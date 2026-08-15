@@ -1,0 +1,105 @@
+{{/* layout.html — AutoSeedRelay v3 基础布局 */}}
+{{define "layout"}}
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{block "title" .}}AutoSeedRelay{{end}}</title>
+    <style>
+        {{template "styles"}}
+    </style>
+</head>
+<body>
+<div class="app-layout">
+    {{/* 左侧导航栏 */}}
+    <aside class="sidebar" id="sidebar">
+        <div class="sidebar-logo">
+            <h1>AutoSeedRelay</h1>
+            <div class="version">v3.0</div>
+        </div>
+        <nav class="sidebar-nav">
+            <a href="#" data-page="dashboard" class="active">
+                <span class="nav-icon">&#x25A3;</span> 仪表盘
+            </a>
+            <a href="#" data-page="seeds">
+                <span class="nav-icon">&#x25C9;</span> 种子
+            </a>
+            <a href="#" data-page="config">
+                <span class="nav-icon">&#x2699;</span> 配置
+            </a>
+            <a href="#" data-page="preview">
+                <span class="nav-icon">&#x25C7;</span> 预览
+            </a>
+            <a href="#" onclick="App.openQB();return false">
+                <span class="nav-icon">&#x25CB;</span> qB 面板
+            </a>
+            <a href="#" data-page="logs">
+                <span class="nav-icon">&#x2630;</span> 日志
+            </a>
+        </nav>
+        <div class="sidebar-footer">
+            <a href="#" id="btn-logout" class="logout-link" title="退出登录">
+                <span class="nav-icon">&#x21AA;</span> 退出
+            </a>
+        </div>
+    </aside>
+
+    {{/* 主内容区 */}}
+    <div class="main-area">
+        {{/* 顶部状态栏 */}}
+        <header class="topbar">
+            <div class="topbar-left">
+                <button class="menu-toggle" id="menu-toggle" title="菜单">&#9776;</button>
+                <div class="status-indicator">
+                    <span class="status-dot running" id="status-dot"></span>
+                    <span id="status-text">运行中</span>
+                </div>
+            </div>
+            <div class="topbar-right">
+                <select class="theme-picker" id="theme-picker">
+                    <option value="dark">🌙 深色</option>
+                    <option value="light">☀️ 纯白</option>
+                    <option value="black">◼ 纯黑</option>
+                    <option value="blue">💧 蓝色</option>
+                </select>
+                <span class="topbar-time" id="topbar-clock"></span>
+                <button class="btn btn-outline btn-sm" id="btn-refresh" title="刷新">&#x21BB; 刷新</button>
+            </div>
+        </header>
+
+        {{/* 页面内容 */}}
+        <main class="content" id="main-content">
+            {{block "content" .}}{{end}}
+        </main>
+    </div>
+</div>
+
+{{/* Toast 通知容器 */}}
+<div id="toast-container" class="toast-container"></div>
+
+{{/* 模态框容器 */}}
+<div id="modal-overlay" class="modal-overlay">
+    <div class="modal">
+        <div class="modal-title" id="modal-title"></div>
+        <div id="modal-body"></div>
+        <div class="modal-actions">
+            <button class="btn btn-outline" id="modal-close">关闭</button>
+        </div>
+    </div>
+</div>
+
+<script>
+    {{template "appjs"}}
+</script>
+</body>
+</html>
+{{end}}
+
+{{define "styles"}}
+{{FetchStyleCSS}}
+{{end}}
+
+{{define "appjs"}}
+{{FetchAppJS}}
+{{end}}

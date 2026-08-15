@@ -1,0 +1,337 @@
+{{/* preview.html — RSS 预览页 */}}
+{{define "title"}}RSS 预览{{end}}
+{{define "content"}}
+<div class="page-header">
+    <h2>RSS 预览</h2>
+    <p class="page-desc">抓取源站 RSS 列表，预览目标站上传字段（只读，不会实际转发）</p>
+</div>
+
+<div class="toolbar">
+    <button class="btn btn-primary" id="btn-fetch-rss" onclick="Preview.fetchRSS()">
+        &#x21BB; 手动刷新
+    </button>
+    <span class="toolbar-info" id="fetch-info"></span>
+</div>
+
+<div class="rss-meta" id="rss-meta" style="display:none">
+    <div class="rss-meta-item">
+        <span class="rss-meta-label">RSS URL</span>
+        <code class="rss-meta-value" id="rss-url-display"></code>
+    </div>
+    <div class="rss-meta-item">
+        <span class="rss-meta-label">抓取频率</span>
+        <span class="rss-meta-value" id="rss-freq-display"></span>
+    </div>
+    <div class="rss-meta-item">
+        <span class="rss-meta-label">上次抓取</span>
+        <span class="rss-meta-value" id="rss-time-display"></span>
+    </div>
+</div>
+
+<div id="preview-content">
+    <div class="empty-state">
+        <p>点击"手动刷新"从源站获取最新种子列表</p>
+    </div>
+</div>
+
+{{/* 预览详情模态框 */}}
+<div id="seed-preview-modal" class="modal-overlay" style="display:none">
+    <div class="modal modal-wide">
+        <div class="modal-title" id="preview-modal-title"></div>
+        <div id="preview-modal-body"></div>
+        <div class="modal-actions">
+            <button class="btn btn-outline" onclick="Preview.closeModal()">关闭</button>
+        </div>
+    </div>
+</div>
+
+<style>
+.page-header { margin-bottom: 16px; }
+.page-header h2 { font-size: 20px; margin-bottom: 4px; }
+.page-desc { color: var(--text-secondary); font-size: 13px; }
+.toolbar { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
+.toolbar-info { color: var(--text-secondary); font-size: 12px; }
+
+.rss-meta {
+  display: flex; flex-wrap: wrap; gap: 16px; margin-bottom: 16px;
+  padding: 10px 14px; background: var(--input-bg); border-radius: 8px;
+  border: 1px solid var(--border);
+}
+.rss-meta-item { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+.rss-meta-label { color: var(--text-secondary); white-space: nowrap; }
+.rss-meta-value { color: var(--text); font-size: 12px; word-break: break-all; }
+.rss-meta-value code { font-size: 11px; background: var(--bg); padding: 2px 6px; border-radius: 4px; }
+
+.seed-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 12px; }
+
+.seed-card {
+  border: 1px solid var(--border); border-radius: 10px;
+  background: var(--card-bg); overflow: hidden;
+  transition: box-shadow 0.2s, border-color 0.2s;
+}
+.seed-card:hover { box-shadow: 0 2px 8px rgba(0,0,0,0.1); border-color: var(--primary); }
+
+.seed-card-body { padding: 12px 14px; }
+.seed-card-title {
+  font-size: 13px; font-weight: 600; line-height: 1.4;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+  overflow: hidden; margin-bottom: 8px; color: var(--text);
+}
+.seed-card-title a { color: var(--text); text-decoration: none; }
+.seed-card-title a:hover { color: var(--primary); }
+
+.seed-card-meta {
+  display: flex; flex-wrap: wrap; gap: 6px 12px; font-size: 11px; color: var(--text-secondary);
+  margin-bottom: 8px;
+}
+.seed-card-meta .meta-item { display: flex; align-items: center; gap: 4px; white-space: nowrap; }
+.seed-card-meta .meta-label { opacity: 0.7; }
+.seed-card-meta .category-tag {
+  display: inline-block; padding: 1px 8px; border-radius: 4px;
+  font-size: 11px; background: var(--primary-light); color: var(--primary);
+}
+.seed-card-meta .size-tag { font-variant-numeric: tabular-nums; }
+
+.seed-card-footer {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 8px 14px; border-top: 1px solid var(--border);
+  background: var(--input-bg);
+}
+.seed-card-footer .btn { font-size: 12px; }
+
+.size-col { text-align: right; white-space: nowrap; }
+
+.modal-wide { max-width: 800px; max-height: 80vh; overflow-y: auto; }
+
+.preview-section { margin-bottom: 16px; }
+.preview-section h4 { font-size: 14px; font-weight: 600; margin-bottom: 6px; color: var(--primary); }
+.preview-meta { display: grid; grid-template-columns: 120px 1fr; gap: 4px 8px; font-size: 13px; margin-bottom: 10px; }
+.preview-meta dt { color: var(--text-secondary); text-align: right; }
+.preview-meta dd { color: var(--text); word-break: break-all; }
+
+.field-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.field-table th, .field-table td { padding: 5px 8px; text-align: left; border-bottom: 1px solid var(--border); }
+.field-table th { font-weight: 600; color: var(--text-secondary); background: var(--input-bg); }
+.field-table .col-field { width: 140px; font-family: monospace; color: var(--primary); }
+.field-table .col-value { word-break: break-all; }
+
+.target-card { border: 1px solid var(--border); border-radius: 8px; padding: 12px 16px; margin-bottom: 12px; }
+.target-card-header { font-size: 14px; font-weight: 600; margin-bottom: 8px; display: flex; align-items: center; gap: 8px; }
+.target-type-tag {
+  display: inline-block; padding: 2px 8px; border-radius: 4px;
+  font-size: 11px; background: var(--primary-light); color: var(--primary);
+}
+
+.error-box { padding: 10px 14px; border-radius: 8px; background: var(--error-bg); color: var(--error); font-size: 13px; margin: 10px 0; }
+
+.spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid transparent; border-top-color: currentColor; border-radius: 50%; animation: spin 0.6s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.empty-state { text-align: center; padding: 40px; color: var(--text-secondary); }
+</style>
+
+<script>
+var Preview = {
+    fetchRSS: function() {
+        var btn = document.getElementById('btn-fetch-rss');
+        var info = document.getElementById('fetch-info');
+        btn.disabled = true;
+        btn.innerHTML = '<span class="spinner"></span> 抓取中...';
+        info.textContent = '';
+
+        fetch('/api/preview/fetch')
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                btn.disabled = false;
+                btn.innerHTML = '&#x21BB; 手动刷新';
+                if (data.error) {
+                    info.textContent = '错误: ' + data.error;
+                    document.getElementById('preview-content').innerHTML =
+                        '<div class="error-box">' + Preview.esc(data.error) + '</div>';
+                    document.getElementById('rss-meta').style.display = 'none';
+                    return;
+                }
+                var total = data.total || 0;
+                info.textContent = '共 ' + total + ' 条';
+
+                // Show RSS meta.
+                var meta = document.getElementById('rss-meta');
+                meta.style.display = 'flex';
+                document.getElementById('rss-url-display').textContent = data.rss_url || '-';
+                var freq = data.poll_interval ? (data.poll_interval + ' 秒') : '-';
+                document.getElementById('rss-freq-display').textContent = freq;
+                document.getElementById('rss-time-display').textContent = data.fetched_at
+                    ? Preview.formatLocalTime(data.fetched_at) : '-';
+
+                Preview.renderCards(data.items || []);
+            })
+            .catch(function(err) {
+                btn.disabled = false;
+                btn.innerHTML = '&#x21BB; 手动刷新';
+                info.textContent = '请求失败: ' + err.message;
+            });
+    },
+
+    formatLocalTime: function(isoStr) {
+        try {
+            var d = new Date(isoStr);
+            return d.toLocaleString('zh-CN');
+        } catch(e) { return isoStr || '-'; }
+    },
+
+    renderCards: function(items) {
+        var container = document.getElementById('preview-content');
+        if (!items || items.length === 0) {
+            container.innerHTML = '<div class="empty-state"><p>没有抓取到种子</p></div>';
+            return;
+        }
+
+        var html = '<div class="seed-cards">';
+        items.forEach(function(it) {
+            html +=
+            '<div class="seed-card">' +
+                '<div class="seed-card-body">' +
+                    '<div class="seed-card-title">' +
+                        '<a href="javascript:void(0)" onclick="Preview.previewSeed(\'' + Preview.escAttr(it.id) + '\', \'' + Preview.escAttr(it.title) + '\')">' +
+                            Preview.esc(it.title) +
+                        '</a>' +
+                    '</div>' +
+                    '<div class="seed-card-meta">' +
+                        '<span class="meta-item"><span class="category-tag">' + Preview.esc(it.category_name || '-') + '</span></span>' +
+                        '<span class="meta-item size-tag">' + Preview.formatSize(it.size || 0) + '</span>' +
+                        '<span class="meta-item"><span class="meta-label">ID:</span>' + Preview.esc(it.id) + '</span>' +
+                        '<span class="meta-item"><span class="meta-label">时间:</span>' + Preview.esc(it.pub_date || '-') + '</span>' +
+                    '</div>' +
+                '</div>' +
+                '<div class="seed-card-footer">' +
+                    '<span class="meta-item" style="font-size:11px;color:var(--text-secondary)">GUID: ' + Preview.esc((it.guid || '-').substring(0, 24)) + '</span>' +
+                    '<button class="btn btn-sm btn-outline" onclick="Preview.previewSeed(\'' + Preview.escAttr(it.id) + '\', \'' + Preview.escAttr(it.title) + '\')">预览转发</button>' +
+                '</div>' +
+            '</div>';
+        });
+        html += '</div>';
+        container.innerHTML = html;
+    },
+
+    previewSeed: function(id, title) {
+        var modal = document.getElementById('seed-preview-modal');
+        var titleEl = document.getElementById('preview-modal-title');
+        var bodyEl = document.getElementById('preview-modal-body');
+
+        titleEl.textContent = '种子预览: ' + title;
+        bodyEl.innerHTML = '<div style="text-align:center;padding:30px"><span class="spinner"></span> 加载中...</div>';
+        modal.style.display = 'flex';
+
+        fetch('/api/preview/seed?id=' + encodeURIComponent(id))
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                if (data.error) {
+                    bodyEl.innerHTML = '<div class="error-box">' + Preview.esc(data.error) + '</div>';
+                    return;
+                }
+                Preview.renderPreview(data);
+            })
+            .catch(function(err) {
+                bodyEl.innerHTML = '<div class="error-box">请求失败: ' + Preview.esc(err.message) + '</div>';
+            });
+    },
+
+    renderPreview: function(data) {
+        var item = data.item || {};
+        var targets = data.targets || [];
+
+        var html = '';
+
+        // Item info.
+        html += '<div class="preview-section"><h4>种子信息</h4>';
+        html += '<dl class="preview-meta">';
+        html += '<dt>ID:</dt><dd>' + Preview.esc(item.id) + '</dd>';
+        html += '<dt>标题:</dt><dd>' + Preview.esc(item.title) + '</dd>';
+        html += '<dt>分类:</dt><dd>' + Preview.esc(item.category_name || '-') + ' (ID: ' + Preview.esc(item.category_id || '-') + ')</dd>';
+        html += '<dt>大小:</dt><dd>' + Preview.formatSize(item.size || 0) + '</dd>';
+        html += '<dt>Info Hash:</dt><dd><code>' + Preview.esc(item.info_hash || '-') + '</code></dd>';
+        html += '<dt>文件数:</dt><dd>' + (item.file_count || 0) + '</dd>';
+        html += '<dt>解析名称:</dt><dd>' + Preview.esc(item.parsed_name || '-') + '</dd>';
+        html += '</dl></div>';
+
+        // Target previews.
+        html += '<div class="preview-section"><h4>目标站字段预览 (' + targets.length + ' 个站点)</h4>';
+
+        if (targets.length === 0) {
+            html += '<p style="color:var(--text-secondary)">没有配置目标站</p>';
+        }
+
+        targets.forEach(function(tp) {
+            html += '<div class="target-card">';
+            html += '<div class="target-card-header">' +
+                Preview.esc(tp.name) +
+                ' <span class="target-type-tag">' + Preview.esc(tp.type) + '</span>' +
+                '</div>';
+
+            if (tp.error) {
+                html += '<div class="error-box">' + Preview.esc(tp.error) + '</div>';
+            } else {
+                if (tp.base_url) {
+                    html += '<p style="font-size:12px;color:var(--text-secondary);margin-bottom:8px">' +
+                        'Base: ' + Preview.esc(tp.base_url) + '</p>';
+                }
+                if (tp.announce_url) {
+                    html += '<p style="font-size:12px;color:var(--text-secondary);margin-bottom:8px">' +
+                        'Announce: ' + Preview.esc(tp.announce_url) + '</p>';
+                }
+                if (tp.fields && Object.keys(tp.fields).length > 0) {
+                    html += '<table class="field-table"><thead><tr><th>字段</th><th>值</th></tr></thead><tbody>';
+                    Object.keys(tp.fields).forEach(function(k) {
+                        var v = tp.fields[k];
+                        var display = (v === null || v === undefined) ? '-' : String(v);
+                        html += '<tr><td class="col-field">' + Preview.esc(k) + '</td>' +
+                            '<td class="col-value">' + Preview.esc(display) + '</td></tr>';
+                    });
+                    html += '</tbody></table>';
+                } else {
+                    html += '<p style="color:var(--text-secondary);font-size:12px">无字段</p>';
+                }
+            }
+            html += '</div>';
+        });
+
+        html += '</div>';
+
+        document.getElementById('preview-modal-body').innerHTML = html;
+    },
+
+    closeModal: function() {
+        document.getElementById('seed-preview-modal').style.display = 'none';
+    },
+
+    formatSize: function(bytes) {
+        if (!bytes || bytes === 0) return '-';
+        var units = ['B', 'KB', 'MB', 'GB', 'TB'];
+        var i = 0;
+        var size = bytes;
+        while (size >= 1024 && i < units.length - 1) {
+            size /= 1024;
+            i++;
+        }
+        return size.toFixed(i > 0 ? 1 : 0) + ' ' + units[i];
+    },
+
+    esc: function(s) {
+        if (!s) return '';
+        var div = document.createElement('div');
+        div.textContent = '' + s;
+        return div.innerHTML;
+    },
+
+    escAttr: function(s) {
+        if (!s) return '';
+        return ('' + s).replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/'/g,'&#39;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    }
+};
+
+// Close modal on overlay click.
+document.getElementById('seed-preview-modal').addEventListener('click', function(e) {
+    if (e.target === this) Preview.closeModal();
+});
+</script>
+{{end}}

@@ -1,0 +1,106 @@
+================================================================================
+源站 #172843 vs 目标站 #163376  页面结构全量对比
+源: https://pt.internal-source.org/details.php?id=172843
+目: https://dev.internal-source.org/details.php?id=163376
+================================================================================
+
+【页面标题】
+源: 星陨阁 :: 种子详情 "A Will Eternal S01E171 2020 2160p WEB-DL HEVC DDP2.0-Pure@StarfallWeb" - Powered by NexusPHP
+目: 星陨阁-dev :: 种子详情 "A Will Eternal S01E171 2020 2160p WEB-DL HEVC DDP2.0-Pure@StarfallWeb" - Powered by NexusPHP
+
+【rowhead 逐行对比】
+  # 字段             源站                                                 目标站                                                状态
+--- -------------- -------------------------------------------------- -------------------------------------------------- ----
+  1 下载              [星陨阁].一念永恒.A.Will.Eternal.S01.2020.2160p.WEB-DL    [星陨阁].一念永恒.A.Will.Eternal.S01.2020.2160p.WEB-DL   OK
+  2 副标题            一念永恒 第四季 / 一念永恒 完结季 | 第1季 第171集 | 导演:苏晓光 | 主演:马正   一念永恒 第四季 / 一念永恒 完结季 | 第1季 第171集 | 导演:苏晓光 | 主演:马正   OK
+  3 标签              官方  国语  中字  去头尾广告纯净版  分集                          (无)                                                Missing
+  4 基本信息             大小：  520.78 MB&nbsp;&nbsp;&nbsp; 类型: &nbsp;动漫&     大小：  520.78 MB&nbsp;&nbsp;&nbsp; 类型: &nbsp;动漫    OK
+  5 行为               &nbsp;  下载种子   &nbsp;|&nbsp;                       &nbsp;  下载种子   &nbsp;|&nbsp;  &nbsp;  编辑/刪除      OK
+  6 认领种子            &nbsp;已被  0  个用户认领，剩余  50  个名额。&nbsp;  认领详情        &nbsp;已被  0  个用户认领，剩余  50  个名额。&nbsp;  认领详情       OK
+  7 种子链接            右键查看。                                              右键查看。                                             OK
+  8 字幕                该种子暂无字幕                                            该种子暂无字幕                                         OK
+  9 置顶促销              当前促销： 2X Free 
+ 发起人： 匿名 
+ 截止时间： 2026-08-14 01   (无)                                                Missing
+ 10 MediaInfo               Runtime:  15 min 12 s                                                                        DIFF
+ 11 简介                 引用      星陨阁纯净组 2026年8月11日 
+内容来源于网络，仅作技术交流学习       引用      转自 星陨阁 
+种子ID: 172843 | Pure@Starfall   DIFF
+ 12 种子文件               文件数： 1个文件   [查看列表]    [隐藏列表]     Hash码: &nbs       文件数： 1个文件   [查看列表]    [隐藏列表]     Hash码: &nbs   OK
+ 13 热度表                查看:  11   点击:  73    完成:     21 次  &lt;--- 点       查看:  0   点击:  0    完成:     0 次  &lt;--- 点击查看   DIFF
+ 14 同伴[查看列表][隐藏列表]   14个做种者  |  1个下载者                                   0个做种者  |  0个下载者                                  DIFF
+ 15 星焱奖励              &nbsp;目前发布人已获得 0 个星焱奖励。&nbsp      Claude    &       &nbsp;目前发布人已获得 0 个星焱奖励。&nbsp      admin    &   DIFF
+ 16 感谢者                   Claude        &nbsp;&nbsp; 暂无感谢者                   admin        &nbsp;&nbsp; 暂无感谢者             DIFF
+
+【MediaInfo 区块】
+源站 rowhead:          Runtime:  15 min 12 s
+目标 rowhead:     
+源站 <pre> 块: 有 (3439 chars)
+目标 <pre> 块: 有 (0 chars)
+
+【简介 descr】
+源站: 1463 字符
+目标: 9909 字符
+目标 descr 含转义HTML: 否
+目标 descr 含BBCode: 否
+
+--- 源站descr前800字 ---
+<fieldset><legend> 引用 </legend><br /><b><span style="color: Blue;"><font size="4">星陨阁纯净组 2026年8月11日<br />
+内容来源于网络，仅作技术交流学习分享！</b></fieldset><br /><br />
+<img style="max-width: 100%" id="" alt="image" src="https://img9.doubanio.com/view/photo/l_ratio_poster/public/p2934292395.jpg" onload="Scale(this,700,0);" onclick="Preview(this);" /><br />
+<br />
+◎译　　名　​一念永恒 完结季​<br />
+◎片　　名　​一念永恒 完结季​<br />
+◎年　　代　2026<br />
+◎产　　地　中国大陆<br />
+◎类　　别　剧情 / 喜剧 / 动作<br />
+◎上映日期　2026-07-22(中国大陆)<br />
+◎豆瓣链接　<a class="faqlink" href="https://movie.douban.com/subject/37448094/" target="_blank">https://movie.douban.com/subject/37448094/</a><br />
+◎片　　长　22分钟<br />
+<br />
+◎简　　介<br />
+<br />
+　　为苍生大义，白小纯不得不与通天道人展开决战。随着旧世界破碎，众人流落天外的永恒大陆。而在这里白小纯将面对更严峻的挑战，更强大的敌人……<br />
+<br />
+<img style="max-width: 100%" 
+
+--- 目标descr前800字 ---
+<fieldset><legend> 引用 </legend><br /><b><span style="color: blue;"><font size="4">转自 星陨阁<br />
+种子ID: 172843 | Pure@StarfallWeb | 感谢原发布者!</font></span></b></fieldset><br /><br />
+<br />
+<fieldset><legend> 引用:  引用  </legend><br /><b>星陨阁纯净组 2026年8月11日<br />
+<br />
+内容来源于网络，仅作技术交流学习分享！</b></fieldset><br /><br />
+<br />
+<br />
+<img style="max-width: 100%" id="" alt="image" src="https://img.internal-source.org/i/2026/08/12/6a7bcf1baaafb.jpg" onload="Scale(this,700,0);" onclick="Preview(this);" /><br />
+<br />
+<br />
+<br />
+◎译　　名　​一念永恒 完结季​<br />
+<br />
+◎片　　名　​一念永恒 完结季​<br />
+<br />
+◎年　　代　2026<br />
+<br />
+◎产　　地　中国大陆<br />
+<br />
+◎类　　别　剧情 / 喜剧 / 动作<br />
+<br />
+◎上映日期　2026-07-22(中国大陆)<br />
+<br />
+◎豆瓣链接　<a class="faqlink" href="https://movie.douban.com/subject/37448094/" target="_blank">https
+
+【图片】
+源站: 32张
+目标: 36张
+  源外部: https://img9.doubanio.com/view/photo/l_ratio_poster/public/p2934292395.jpg
+  源外部: https://img.internal-source.org/i/2026/08/11/6a7b3e7836d95.png
+  源外部: https://img.internal-source.org/i/2026/08/11/6a7b3e785f54a.png
+  源外部: https://img.internal-source.org/i/2026/08/11/6a7b3e79675f1.png
+  源外部: https://img.internal-source.org/i/2026/08/11/6a7b3e7aa57cc.png
+  目外部: https://img.internal-source.org/i/2026/08/12/6a7bcf1baaafb.jpg
+  目外部: https://img.internal-source.org/i/2026/08/11/6a7b3e7836d95.png
+  目外部: https://img.internal-source.org/i/2026/08/11/6a7b3e785f54a.png
+  目外部: https://img.internal-source.org/i/2026/08/11/6a7b3e79675f1.png
+  目外部: https://img.internal-source.org/i/2026/08/11/6a7b3e7aa57cc.png

@@ -1,0 +1,17 @@
+.git
+.github
+docs
+archive
+vertex-ref*
+.pytest_cache
+.gocache
+.gopath
+.npm-cache
+frontend/node_modules
+frontend/dist
+frontend/.npm-cache
+backend/.gocache
+backend/.gopath
+data
+*.torrent
+.env

@@ -1,0 +1,28 @@
+# syntax=docker/dockerfile:1
+#
+# AutoSeedRelay — PT 站自动转种工具镜像(Go 版)
+# 多阶段构建:golang 构建二进制 → scratch 运行。
+# 默认命令:/relay run(调度循环,可被 CMD 覆盖)。
+# 敏感信息(passkey/token/cookie)经环境变量注入,不写入镜像/仓库。
+FROM golang:1.22-alpine AS builder
+
+WORKDIR /app
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o /relay ./cmd/relay/
+
+FROM alpine:3.20
+RUN apk add --no-cache ca-certificates tzdata
+ENV TZ=Asia/Shanghai
+WORKDIR /app
+COPY --from=builder /relay /usr/local/bin/relay
+# 默认配置文件
+COPY config/ /app/config/
+RUN cp /app/config/relay.yaml.example /app/config/relay.yaml && \
+    mkdir -p /app/data /app/logs && \
+    chmod 777 /app/data /app/logs
+EXPOSE 9020
+VOLUME ["/data"]
+ENTRYPOINT ["/usr/local/bin/relay"]
+CMD ["serve"]

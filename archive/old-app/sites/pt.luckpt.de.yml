@@ -1,0 +1,93 @@
+# luckpt.de 预设配置
+
+name: "LuckPT"
+base_url: "https://pt.luckpt.de"
+type: nexusphp
+
+announce: "https://pt.luckpt.de/announce.php?passkey={passkey}"
+
+categories:
+  电影: 401
+  电视剧: 402
+  动画: 405
+  MV: 406
+  音乐: 408
+  其他: 409
+  综艺: 410
+  纪录片: 411
+  体育: 412
+  短剧: 413
+
+tags:
+  官方: { skip: true, reason: "不是自家站点不算官方" }
+  国语: 5
+  中字: 6
+  HDR: 19
+  完结: 10
+  去头尾广告纯净版: { skip: true, reason: "无对应标签" }
+  分集: { skip: true, reason: "无对应标签" }
+
+dimensions:
+  standard:
+    "1080p/1080i": 1
+    "720p/720i": 3
+    "480p/480i": 4
+    "2K/1440p/1440i": 5
+    "4K/2160p/2160i": 6
+    "8K/4320p/4320i": 7
+    Other: 8
+  codec:
+    "H.264/AVC": 1
+    AV1: 2
+    VC-1: 3
+    MPEG-2: 4
+    Other: 5
+    "H.265/HEVC": 6
+    "MPEG-4/XviD": 12
+  audiocodec:
+    FLAC: 1
+    APE: 2
+    DTS: 3
+    MP3: 4
+    OGG: 5
+    AAC: 6
+    Other: 7
+    "DD/AC3": 8
+    "TrueHD Atmos": 11
+    "DDP/E-AC3": 12
+    LPCM: 13
+    TrueHD: 14
+    "DTS:X": 15
+    "DTS-HD MA": 16
+    M4A: 17
+    WAV: 18
+    PCM: 19
+  medium:
+    "Blu-ray": 1
+    Remux: 3
+    HDTV: 5
+    DVD: 6
+    Encode: 7
+    CD: 8
+    Track: 9
+    "UHD Blu-ray": 10
+    WEB-DL: 11
+    Other: 13
+  team:
+    FRDS: 9
+    StarfallWeb: 10
+    LuckAni: 11
+    LuckDIY: 12
+    LuckDocu: 13
+    LuckMusic: 8
+    LuckWeb: 7
+    Other: 5
+
+team_aliases:
+  "Pure@StarfallWeb": StarfallWeb
+
+credentials:
+  - name: api_token
+    env: AUTOSEED_LUCKPT_TOKEN
+    label: "API Token (Sanctum Bearer)"
+    required: true

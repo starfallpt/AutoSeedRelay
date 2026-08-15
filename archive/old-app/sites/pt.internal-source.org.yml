@@ -1,0 +1,49 @@
+# 星陨阁 源站预设配置
+# 用户只需填写下方 [必填] 凭据即可使用
+
+name: "星陨阁"
+base_url: "https://pt.internal-source.org"
+role: source
+
+# RSS 地址模板
+rss: "https://pt.internal-source.org/torrentrss.php?passkey={passkey}&rows=50&linktype=dl"
+
+# 详情页信息提取
+detail:
+  mediainfo_selector: "pre"           # MediaInfo 在 <pre> 标签内
+  descr_selector: "#kdescr"          # 简介在 #kdescr
+  filelist_url: "viewfilelist.php"   # 文件列表端点
+
+# 分类
+categories:
+  电影: 401
+  电视剧: 402
+  综艺: 403
+  纪录片: 404
+  动漫: 405
+  MV: 406
+  体育: 407
+  音频: 408
+  其他: 409
+  短剧: 410
+
+# 源站标签（从详情页提取后，按此表映射到目标站）
+tags:
+  official: 官方
+  国语: 国语
+  中字: 中字
+  去头尾广告纯净版: 去头尾广告纯净版
+  HDR: HDR
+  完结: 完结
+  分集: 分集
+
+# [必填] 用户凭据 (环境变量注入)
+credentials:
+  - name: cookie
+    env: AUTOSEED_SRC_COOKIE
+    label: "登录 Cookie"
+    required: true
+  - name: passkey
+    env: AUTOSEED_SRC_PASSKEY
+    label: "RSS / Download Passkey"
+    required: true

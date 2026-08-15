@@ -1,0 +1,36 @@
+# AutoSeedRelay — PT 站自动转种全套部署
+# qB 不暴露端口到宿主机，仅通过 relay 的 /qb/* 反向代理访问
+services:
+  relay:
+    build: .
+    image: ghcr.io/starfallpt/autoseedrelay:latest
+    container_name: autoseedrelay
+    restart: unless-stopped
+    ports:
+      - "9020:9020"
+    volumes:
+      - ./config:/app/config       # 配置文件(需可写，setup会保存)
+      - ./data:/data
+      - /var/run/docker.sock:/var/run/docker.sock:ro   # 读qB日志
+    depends_on:
+      qbittorrent:
+        condition: service_healthy
+
+  qbittorrent:
+    image: qbittorrentofficial/qbittorrent-nox:latest
+    container_name: qbittorrent
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:9021:8080"         # 仅本地访问，用于初始化设密码
+    expose:
+      - "8080"                        # 容器间通信
+    environment:
+      - QBT_WEBUI_PORT=8080
+    volumes:
+      - ./data/downloads:/downloads
+      - ./data/qb-config:/config
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s -o /dev/null -w '%{http_code}' http://localhost:8080/api/v2/app/version | grep -qE '^(200|401|403)'"]
+      interval: 10s
+      timeout: 5s
+      retries: 5

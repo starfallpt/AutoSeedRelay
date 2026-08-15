@@ -1,0 +1,810 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AutoSeedRelay 设置向导</title>
+<style>
+:root {
+  --bg: #f5f5f5;
+  --card-bg: #ffffff;
+  --text: #1a1a2e;
+  --text-secondary: #6b7280;
+  --border: #e5e7eb;
+  --primary: #4f46e5;
+  --primary-hover: #4338ca;
+  --primary-light: #eef2ff;
+  --success: #059669;
+  --error: #dc2626;
+  --error-bg: #fef2f2;
+  --input-bg: #f9fafb;
+  --input-readonly: #e5e7eb;
+  --radius: 8px;
+  --shadow: 0 1px 3px rgba(0,0,0,0.08);
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #111827;
+    --card-bg: #1f2937;
+    --text: #f3f4f6;
+    --text-secondary: #9ca3af;
+    --border: #374151;
+    --primary: #6366f1;
+    --primary-hover: #818cf8;
+    --primary-light: #1e1b4b;
+    --error-bg: #451a1a;
+    --input-bg: #111827;
+    --input-readonly: #374151;
+    --shadow: 0 1px 3px rgba(0,0,0,0.3);
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #111827;
+  --card-bg: #1f2937;
+  --text: #f3f4f6;
+  --text-secondary: #9ca3af;
+  --border: #374151;
+  --primary: #6366f1;
+  --primary-hover: #818cf8;
+  --primary-light: #1e1b4b;
+  --error-bg: #451a1a;
+  --input-bg: #111827;
+  --input-readonly: #374151;
+  --shadow: 0 1px 3px rgba(0,0,0,0.3);
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+}
+
+.container { width: 100%; max-width: 560px; }
+
+.setup-header { text-align: center; margin-bottom: 28px; }
+.setup-header h1 { font-size: 24px; font-weight: 700; margin-bottom: 4px; }
+.setup-header p { color: var(--text-secondary); font-size: 14px; }
+
+.stepper {
+  display: flex; justify-content: center; align-items: center; gap: 0; margin-bottom: 24px;
+}
+.step-dot {
+  width: 32px; height: 32px; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 13px; font-weight: 600; flex-shrink: 0;
+  background: var(--border); color: var(--text-secondary);
+  transition: all 0.3s;
+}
+.step-dot.active { background: var(--primary); color: #fff; }
+.step-dot.done { background: var(--success); color: #fff; }
+.step-line { width: 36px; height: 2px; background: var(--border); flex-shrink: 0; }
+.step-line.done { background: var(--success); }
+
+.card {
+  background: var(--card-bg); border: 1px solid var(--border);
+  border-radius: 12px; padding: 28px; box-shadow: var(--shadow);
+}
+
+.step-title { font-size: 18px; font-weight: 600; margin-bottom: 4px; }
+.step-desc { color: var(--text-secondary); font-size: 13px; margin-bottom: 20px; }
+
+.form-group { margin-bottom: 14px; }
+.form-group label {
+  display: block; font-size: 13px; font-weight: 500; margin-bottom: 4px;
+  color: var(--text-secondary);
+}
+.form-group input {
+  width: 100%; padding: 9px 12px; font-size: 14px;
+  border: 1px solid var(--border); border-radius: var(--radius);
+  background: var(--input-bg); color: var(--text);
+  outline: none; transition: border-color 0.2s;
+}
+.form-group input:focus { border-color: var(--primary); }
+.form-group input[readonly] {
+  background: var(--input-readonly); cursor: not-allowed; color: var(--text-secondary);
+}
+
+.form-group-inline { display: flex; gap: 8px; align-items: flex-end; }
+.form-group-inline input { flex: 1; }
+
+.btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 4px;
+  padding: 10px 20px; border-radius: var(--radius);
+  font-size: 14px; font-weight: 500; cursor: pointer;
+  border: none; transition: all 0.2s;
+}
+.btn-primary { background: var(--primary); color: #fff; }
+.btn-primary:hover { background: var(--primary-hover); }
+.btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
+.btn-outline {
+  background: transparent; border: 1px solid var(--border); color: var(--text);
+}
+.btn-outline:hover { border-color: var(--primary); color: var(--primary); }
+.btn-sm { padding: 6px 14px; font-size: 12px; }
+.btn-block { width: 100%; }
+.btn-group { display: flex; justify-content: space-between; margin-top: 24px; }
+.btn-group-right { display: flex; justify-content: flex-end; gap: 8px; margin-top: 24px; }
+
+.test-result {
+  margin-top: 12px; padding: 10px 14px; border-radius: var(--radius);
+  font-size: 13px; display: none; word-break: break-all;
+}
+.test-result.success { display: block; background: #ecfdf5; color: var(--success); border: 1px solid #a7f3d0; }
+.test-result.error { display: block; background: var(--error-bg); color: var(--error); border: 1px solid #fecaca; }
+
+.spinner {
+  display: inline-block; width: 16px; height: 16px;
+  border: 2px solid transparent; border-top-color: currentColor;
+  border-radius: 50%; animation: spin 0.6s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.source-preset {
+  background: var(--input-bg); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 14px 16px; margin-bottom: 18px;
+  display: flex; align-items: center; gap: 12px;
+}
+.source-preset .preset-icon { font-size: 24px; }
+.source-preset .preset-info { flex: 1; }
+.source-preset .preset-name { font-size: 15px; font-weight: 600; color: var(--text); }
+.source-preset .preset-url { font-size: 12px; color: var(--text-secondary); }
+
+.form-hint {
+  display: block; font-size: 11px; color: var(--text-secondary); margin-top: 3px;
+}
+.required { color: var(--error); }
+.optional { color: var(--text-secondary); font-weight: normal; }
+
+/* Target site cards */
+.target-card {
+  border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 16px; margin-bottom: 12px; transition: opacity 0.2s;
+}
+.target-card.disabled { opacity: 0.5; }
+.target-card-header {
+  display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;
+}
+.target-card-name { font-size: 14px; font-weight: 600; }
+.target-card-type {
+  display: inline-block; font-size: 11px; padding: 2px 8px; border-radius: 4px;
+  background: var(--primary-light); color: var(--primary); margin-left: 8px;
+}
+
+/* Toggle switch */
+.toggle-switch { position: relative; display: inline-block; width: 40px; height: 22px; }
+.toggle-switch input { opacity: 0; width: 0; height: 0; }
+.toggle-slider {
+  position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0;
+  background: var(--border); border-radius: 22px; transition: 0.3s;
+}
+.toggle-slider:before {
+  content: ""; position: absolute; height: 16px; width: 16px;
+  left: 3px; bottom: 3px; background: #fff; border-radius: 50%; transition: 0.3s;
+}
+.toggle-switch input:checked + .toggle-slider { background: var(--success); }
+.toggle-switch input:checked + .toggle-slider:before { transform: translateX(18px); }
+
+.target-card-fields { display: none; }
+.target-card.enabled .target-card-fields { display: block; }
+
+.complete-icon {
+  width: 64px; height: 64px; border-radius: 50%;
+  background: #ecfdf5; color: var(--success);
+  display: flex; align-items: center; justify-content: center;
+  font-size: 32px; margin: 0 auto 16px;
+}
+
+.checkbox-row {
+  display: flex; align-items: center; gap: 8px; margin-bottom: 14px;
+  padding: 8px 12px; background: var(--input-bg); border-radius: var(--radius);
+}
+.checkbox-row input[type="checkbox"] { width: 16px; height: 16px; cursor: pointer; }
+.checkbox-row label { font-size: 13px; color: var(--text); cursor: pointer; }
+
+.summary-section { margin-top: 20px; }
+.summary-section h3 { font-size: 14px; font-weight: 600; margin-bottom: 10px; color: var(--text-secondary); }
+.summary-item {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 8px 0; border-bottom: 1px solid var(--border); font-size: 13px;
+}
+.summary-item:last-child { border-bottom: none; }
+.summary-label { color: var(--text-secondary); }
+.summary-value {
+  font-family: 'SF Mono', 'Fira Code', monospace; font-size: 13px;
+  color: var(--primary); max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.summary-value.muted { color: var(--text-secondary); }
+
+.pw-display {
+  background: var(--primary-light); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 12px 16px; margin-top: 8px;
+  display: flex; align-items: center; justify-content: space-between;
+  font-family: 'SF Mono', 'Fira Code', monospace; font-size: 16px;
+  color: var(--primary);
+}
+</style>
+</head>
+<body>
+<div class="container">
+  <div class="setup-header">
+    <h1>AutoSeedRelay 设置向导</h1>
+    <p>首次使用前，请完成以下配置步骤</p>
+  </div>
+
+  <div class="stepper" id="stepper">
+    <div class="step-dot active" id="sdot1">1</div>
+    <div class="step-line" id="sline12"></div>
+    <div class="step-dot" id="sdot2">2</div>
+    <div class="step-line" id="sline23"></div>
+    <div class="step-dot" id="sdot3">3</div>
+    <div class="step-line" id="sline34"></div>
+    <div class="step-dot" id="sdot4">4</div>
+  </div>
+
+  <div class="card" id="card"></div>
+</div>
+
+<script>
+(function() {
+  var currentStep = 1;
+  var status = { qb: false, source: false, targets: false };
+
+  // Form data stores all fields across steps.
+  var fd = {
+    // Step 1: qBittorrent (host/port/username are fixed).
+    qb_password: '',
+    // Step 2: Source site.
+    src_cookie: '', src_passkey: '', src_token: '',
+    // Step 3: Target sites — keyed by name.
+    targets: {
+      'dev.internal-source.org': { enabled: false, cookie: '', passkey: '' },
+      'luckpt.de':           { enabled: false, api_token: '' },
+      'M-Team':             { enabled: false, api_token: '' },
+    },
+    // Step 4: Completion.
+    web_password: '',
+    sync_qb_password: true,
+  };
+
+  // ---- Utility ----
+
+  function el(tag, cls, html) {
+    var e = document.createElement(tag);
+    if (cls) e.className = cls;
+    if (html) e.innerHTML = html;
+    return e;
+  }
+
+  function fg(labelText, inputId, opts) {
+    opts = opts || {};
+    var div = el('div', 'form-group');
+    var lbl = el('label');
+    lbl.innerHTML = labelText;
+    div.appendChild(lbl);
+    var inp = el('input');
+    inp.type = opts.type || 'text';
+    inp.id = inputId;
+    inp.placeholder = opts.placeholder || '';
+    if (opts.value) inp.value = opts.value;
+    if (opts.readonly) { inp.readOnly = true; }
+    if (opts.onInput) inp.addEventListener('input', opts.onInput);
+    div.appendChild(inp);
+    if (opts.hint) {
+      var h = el('span', 'form-hint');
+      h.textContent = opts.hint;
+      div.appendChild(h);
+    }
+    return div;
+  }
+
+  function testDiv(id) {
+    var d = el('div', 'test-result');
+    d.id = id;
+    return d;
+  }
+
+  function setTestResult(id, ok, msg) {
+    var d = document.getElementById(id);
+    if (!d) return;
+    d.className = 'test-result ' + (ok ? 'success' : 'error');
+    d.textContent = msg;
+  }
+
+  function clearTestResult(id) {
+    var d = document.getElementById(id);
+    if (d) d.className = 'test-result';
+  }
+
+  function api(method, url, body) {
+    var opts = { method: method, headers: { 'Content-Type': 'application/json' } };
+    if (body) opts.body = JSON.stringify(body);
+    return fetch(url, opts).then(function(r) { return r.json(); });
+  }
+
+  function mask(s) {
+    if (!s) return '(未设置)';
+    if (s.length <= 8) return s;
+    return s.substring(0, 4) + '...' + s.substring(s.length - 4);
+  }
+
+  // ---- Password generation ----
+
+  function generatePassword() {
+    var chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789@#$%';
+    var pw = '';
+    for (var i = 0; i < 16; i++) pw += chars[Math.floor(Math.random() * chars.length)];
+    fd.web_password = pw;
+    var inp = document.getElementById('web-password');
+    if (inp) inp.value = pw;
+    var disp = document.getElementById('pw-display-text');
+    if (disp) disp.textContent = pw;
+    var sum = document.getElementById('summary-web-pw');
+    if (sum) sum.textContent = pw;
+  }
+
+  // ---- Stepper ----
+
+  function updateStepper() {
+    var checks = [status.qb, status.source, status.targets];
+    for (var n = 1; n <= 4; n++) {
+      var dot = document.getElementById('sdot' + n);
+      dot.className = 'step-dot';
+      if (n === currentStep) dot.className += ' active';
+      if (n < currentStep) dot.className += ' done';
+    }
+    ['sline12','sline23','sline34'].forEach(function(id, idx) {
+      var line = document.getElementById(id);
+      line.className = 'step-line' + (currentStep > idx + 1 ? ' done' : '');
+    });
+  }
+
+  function goStep(n) {
+    currentStep = n;
+    updateStepper();
+    if (n === 1) renderStep1();
+    else if (n === 2) renderStep2();
+    else if (n === 3) renderStep3();
+    else if (n === 4) renderStep4();
+  }
+
+  // ---- Step 1: qBittorrent ----
+
+  function renderStep1() {
+    var card = document.getElementById('card');
+    card.innerHTML = '';
+
+    card.appendChild(el('div', 'step-title', 'Step 1: qBittorrent 连接'));
+    card.appendChild(el('div', 'step-desc', '测试 qBittorrent WebUI 的连接。主机、端口、用户名已预设，只需输入密码。'));
+
+    card.appendChild(fg('主机地址', 'qb-host', { value: 'qbittorrent', readonly: true }));
+    card.appendChild(fg('端口', 'qb-port', { value: '8080', readonly: true }));
+    card.appendChild(fg('用户名', 'qb-username', { value: 'admin', readonly: true }));
+
+    var pwG = el('div', 'form-group');
+    var pwL = el('label'); pwL.textContent = '密码'; pwG.appendChild(pwL);
+    var pwI = el('input'); pwI.type = 'password'; pwI.id = 'qb-password';
+    pwI.placeholder = 'CHANGE_ME';
+    pwI.value = fd.qb_password;
+    pwI.addEventListener('input', function() { fd.qb_password = pwI.value; });
+    pwG.appendChild(pwI);
+    card.appendChild(pwG);
+
+    var result = testDiv('qb-result');
+    card.appendChild(result);
+
+    var btnGroup = el('div', 'btn-group');
+    var testBtn = el('button', 'btn btn-outline'); testBtn.textContent = '测试连接';
+    testBtn.addEventListener('click', testQB);
+    btnGroup.appendChild(testBtn);
+    var nextBtn = el('button', 'btn btn-primary'); nextBtn.textContent = '下一步';
+    nextBtn.id = 'qb-next-btn';
+    if (!status.qb) nextBtn.disabled = true;
+    nextBtn.addEventListener('click', function() { goStep(2); });
+    btnGroup.appendChild(nextBtn);
+    card.appendChild(btnGroup);
+  }
+
+  function testQB() {
+    var testBtn = document.querySelector('#card .btn-outline');
+    var nextBtn = document.getElementById('qb-next-btn');
+    testBtn.disabled = true;
+    testBtn.innerHTML = '<span class="spinner"></span>测试中...';
+    nextBtn.disabled = true;
+    clearTestResult('qb-result');
+
+    api('POST', '/api/setup/qb', {
+      host: 'qbittorrent',
+      port: 8080,
+      username: 'admin',
+      password: fd.qb_password || '',
+      use_ssl: false,
+    }).then(function(data) {
+      testBtn.disabled = false;
+      testBtn.innerHTML = '测试连接';
+      if (data.ok) {
+        var msg = '连接成功！版本: ' + (data.version || '未知');
+        if (data.disk_free_gb) msg += ', 可用空间: ' + data.disk_free_gb.toFixed(1) + ' GB';
+        setTestResult('qb-result', true, msg);
+        status.qb = true;
+        nextBtn.disabled = false;
+        updateStepper();
+      } else {
+        setTestResult('qb-result', false, '连接失败: ' + (data.error || '未知错误'));
+        status.qb = false;
+      }
+    }).catch(function(err) {
+      testBtn.disabled = false;
+      testBtn.innerHTML = '测试连接';
+      setTestResult('qb-result', false, '请求失败: ' + err.message);
+    });
+  }
+
+  // ---- Step 2: Source ----
+
+  function renderStep2() {
+    var card = document.getElementById('card');
+    card.innerHTML = '';
+
+    card.appendChild(el('div', 'step-title', 'Step 2: 源站配置'));
+    card.appendChild(el('div', 'step-desc', '配置星陨阁源站的访问凭据，用于 RSS 抓取和种子下载。'));
+
+    var preset = el('div', 'source-preset');
+    preset.innerHTML = '<div class="preset-icon">&#x1F4E1;</div><div class="preset-info"><div class="preset-name">星陨阁</div><div class="preset-url">pt.internal-source.org</div></div>';
+    card.appendChild(preset);
+
+    var cg = el('div', 'form-group');
+    cg.innerHTML = '<label>Cookie <span class="required">*</span></label>';
+    var ci = el('input'); ci.type = 'text'; ci.id = 'src-cookie'; ci.placeholder = '登录会话 Cookie';
+    ci.value = fd.src_cookie;
+    ci.addEventListener('input', function() { fd.src_cookie = ci.value; });
+    cg.appendChild(ci);
+    cg.appendChild(el('span', 'form-hint', '用于访问详情页和下载种子'));
+    card.appendChild(cg);
+
+    var pg = el('div', 'form-group');
+    pg.innerHTML = '<label>Passkey <span class="required">*</span></label>';
+    var pi = el('input'); pi.type = 'text'; pi.id = 'src-passkey'; pi.placeholder = '990794a23160ba...';
+    pi.value = fd.src_passkey;
+    pi.addEventListener('input', function() { fd.src_passkey = pi.value; });
+    pg.appendChild(pi);
+    pg.appendChild(el('span', 'form-hint', '用于 RSS 抓取和种子下载'));
+    card.appendChild(pg);
+
+    var tg = el('div', 'form-group');
+    tg.innerHTML = '<label>API Token <span class="optional">(可选)</span></label>';
+    var ti = el('input'); ti.type = 'text'; ti.id = 'src-token'; ti.placeholder = '92|Dg7w5hdyIr0hr...';
+    ti.value = fd.src_token;
+    ti.addEventListener('input', function() { fd.src_token = ti.value; });
+    tg.appendChild(ti);
+    tg.appendChild(el('span', 'form-hint', 'Sanctum API Token，留空则使用 Cookie 爬取'));
+    card.appendChild(tg);
+
+    var result = testDiv('source-result');
+    card.appendChild(result);
+
+    var btnGroup = el('div', 'btn-group');
+    var backBtn = el('button', 'btn btn-outline'); backBtn.textContent = '上一步';
+    backBtn.addEventListener('click', function() { goStep(1); });
+    btnGroup.appendChild(backBtn);
+    var saveBtn = el('button', 'btn btn-primary'); saveBtn.textContent = '保存并继续';
+    saveBtn.addEventListener('click', saveSource);
+    btnGroup.appendChild(saveBtn);
+    card.appendChild(btnGroup);
+  }
+
+  function saveSource() {
+    var saveBtn = document.querySelector('#card .btn-primary');
+    saveBtn.disabled = true;
+    clearTestResult('source-result');
+
+    api('POST', '/api/setup/source', {
+      cookie: fd.src_cookie || '',
+      passkey: fd.src_passkey || '',
+      token: fd.src_token || '',
+    }).then(function(data) {
+      saveBtn.disabled = false;
+      if (data.ok) {
+        setTestResult('source-result', true, '源站配置已保存: ' + (data.name || '星陨阁'));
+        status.source = true;
+        updateStepper();
+        goStep(3);
+      } else {
+        setTestResult('source-result', false, '保存失败: ' + (data.error || '未知错误'));
+      }
+    }).catch(function(err) {
+      saveBtn.disabled = false;
+      setTestResult('source-result', false, '请求失败: ' + err.message);
+    });
+  }
+
+  // ---- Step 3: Targets ----
+
+  var presetSites = [
+    { name: 'dev.internal-source.org', type: 'classic', typeLabel: 'classic 表单', fields: [
+      { id: 'cookie', label: 'Cookie', placeholder: '目标站 Cookie' },
+      { id: 'passkey', label: 'Passkey', placeholder: '目标站 Passkey' },
+    ]},
+    { name: 'luckpt.de', type: 'nexusphp', typeLabel: 'NexusPHP API', fields: [
+      { id: 'api_token', label: 'API Token', placeholder: 'NexusPHP API Token' },
+    ]},
+    { name: 'M-Team', type: 'mteam', typeLabel: 'M-Team API', fields: [
+      { id: 'api_token', label: 'API Token', placeholder: 'M-Team x-api-key' },
+    ]},
+  ];
+
+  function renderStep3() {
+    var card = document.getElementById('card');
+    card.innerHTML = '';
+
+    card.appendChild(el('div', 'step-title', 'Step 3: 目标站配置'));
+    card.appendChild(el('div', 'step-desc', '选择要转发到的目标站点。不需要的站点关闭开关即可跳过。'));
+
+    var container = el('div');
+    container.id = 'targets-container';
+    card.appendChild(container);
+
+    // Render preset site cards.
+    presetSites.forEach(function(site, idx) {
+      var t = fd.targets[site.name] || { enabled: false };
+      var cardDiv = el('div', 'target-card' + (t.enabled ? ' enabled' : ' disabled'));
+      cardDiv.dataset.siteIdx = idx;
+
+      // Header row.
+      var header = el('div', 'target-card-header');
+
+      var nameSpan = el('span', 'target-card-name');
+      nameSpan.textContent = site.name;
+      var typeSpan = el('span', 'target-card-type');
+      typeSpan.textContent = site.typeLabel;
+      nameSpan.appendChild(typeSpan);
+      header.appendChild(nameSpan);
+
+      // Toggle.
+      var toggleLabel = el('label', 'target-card-toggle');
+      toggleLabel.style.cssText = 'display:flex;align-items:center;gap:8px;cursor:pointer;';
+      var toggleSw = el('span', 'toggle-switch');
+      var cb = el('input');
+      cb.type = 'checkbox';
+      cb.checked = !!t.enabled;
+      cb.addEventListener('change', (function(sn, cardEl) {
+        return function() {
+          fd.targets[sn].enabled = this.checked;
+          cardEl.classList.toggle('enabled', this.checked);
+          cardEl.classList.toggle('disabled', !this.checked);
+          // Clear fields when disabling.
+          if (!this.checked) {
+            var fields = cardEl.querySelectorAll('.target-card-fields input');
+            fields.forEach(function(f) { f.value = '';
+              var s = fd.targets[sn];
+              if (s) {
+                Object.keys(s).forEach(function(k) { if (k !== 'enabled') s[k] = ''; });
+              }
+            });
+          }
+        };
+      })(site.name, cardDiv));
+      toggleSw.appendChild(cb);
+      toggleSw.appendChild(el('span', 'toggle-slider'));
+      toggleLabel.appendChild(toggleSw);
+      toggleLabel.appendChild(document.createTextNode(t.enabled ? '已启用' : '已禁用'));
+      header.appendChild(toggleLabel);
+      cardDiv.appendChild(header);
+
+      // Fields.
+      var fieldsDiv = el('div', 'target-card-fields');
+      site.fields.forEach(function(field) {
+        var fgDiv = el('div', 'form-group');
+        fgDiv.style.marginBottom = '10px';
+        var lbl = el('label'); lbl.textContent = field.label;
+        fgDiv.appendChild(lbl);
+        var inp = el('input'); inp.type = 'text';
+        inp.placeholder = field.placeholder;
+        inp.value = t[field.id] || '';
+        inp.addEventListener('input', (function(sn, fid) {
+          return function(e) {
+            if (!fd.targets[sn]) fd.targets[sn] = { enabled: false };
+            fd.targets[sn][fid] = e.target.value;
+          };
+        })(site.name, field.id));
+        fgDiv.appendChild(inp);
+        fieldsDiv.appendChild(fgDiv);
+      });
+      cardDiv.appendChild(fieldsDiv);
+
+      container.appendChild(cardDiv);
+    });
+
+    var result = testDiv('targets-result');
+    card.appendChild(result);
+
+    var btnGroup = el('div', 'btn-group');
+    var backBtn = el('button', 'btn btn-outline'); backBtn.textContent = '上一步';
+    backBtn.addEventListener('click', function() { goStep(2); });
+    btnGroup.appendChild(backBtn);
+    var saveBtn = el('button', 'btn btn-primary'); saveBtn.textContent = '保存并继续';
+    saveBtn.addEventListener('click', saveTargets);
+    btnGroup.appendChild(saveBtn);
+    card.appendChild(btnGroup);
+  }
+
+  function saveTargets() {
+    var saveBtn = document.querySelector('#card .btn-primary');
+    saveBtn.disabled = true;
+    clearTestResult('targets-result');
+
+    var payload = { targets: [] };
+    presetSites.forEach(function(site) {
+      var t = fd.targets[site.name];
+      if (!t || !t.enabled) return;
+
+      var item = { name: site.name, enabled: true };
+      site.fields.forEach(function(f) {
+        item[f.id] = (t[f.id] || '').trim();
+      });
+      payload.targets.push(item);
+    });
+
+    if (payload.targets.length === 0) {
+      saveBtn.disabled = false;
+      setTestResult('targets-result', false, '请至少启用一个目标站并填写凭据');
+      return;
+    }
+
+    api('POST', '/api/setup/targets', payload).then(function(data) {
+      saveBtn.disabled = false;
+      if (data.ok) {
+        setTestResult('targets-result', true, '目标站配置已保存 (' + (data.count || 0) + ' 个站点)');
+        status.targets = true;
+        updateStepper();
+        goStep(4);
+      } else {
+        setTestResult('targets-result', false, '保存失败: ' + (data.error || '未知错误'));
+      }
+    }).catch(function(err) {
+      saveBtn.disabled = false;
+      setTestResult('targets-result', false, '请求失败: ' + err.message);
+    });
+  }
+
+  // ---- Step 4: Complete ----
+
+  function renderStep4() {
+    var card = document.getElementById('card');
+    card.innerHTML = '';
+
+    var icon = el('div', 'complete-icon'); icon.textContent = '✓'; card.appendChild(icon);
+    card.appendChild(el('div', 'step-title', 'Step 4: 完成设置'));
+    var desc = el('div', 'step-desc');
+    desc.style.textAlign = 'center';
+    desc.textContent = '设置 Web 面板登录密码，确认配置信息后完成初始化。';
+    card.appendChild(desc);
+
+    // Password input + generate button.
+    var pwG = el('div', 'form-group');
+    pwG.innerHTML = '<label>Web 面板密码</label>';
+    var pwRow = el('div', 'form-group-inline');
+    var pwI = el('input'); pwI.type = 'password'; pwI.id = 'web-password';
+    pwI.placeholder = '留空则使用默认密码 admin';
+    pwI.value = fd.web_password;
+    pwI.addEventListener('input', function() { fd.web_password = pwI.value; });
+    pwRow.appendChild(pwI);
+    var genBtn = el('button', 'btn btn-sm');
+    genBtn.type = 'button';
+    genBtn.textContent = '🎲 生成';
+    genBtn.addEventListener('click', generatePassword);
+    pwRow.appendChild(genBtn);
+    pwG.appendChild(pwRow);
+    card.appendChild(pwG);
+
+    // Show generated password if any.
+    if (fd.web_password) {
+      var pwDisp = el('div', 'pw-display');
+      pwDisp.innerHTML = '<span>已生成密码:</span><code id="pw-display-text">' + fd.web_password + '</code>';
+      card.appendChild(pwDisp);
+    }
+
+    // Sync qB password checkbox.
+    var cbRow = el('div', 'checkbox-row');
+    var syncCb = el('input'); syncCb.type = 'checkbox'; syncCb.id = 'sync-qb-pw';
+    syncCb.checked = fd.sync_qb_password;
+    syncCb.addEventListener('change', function() { fd.sync_qb_password = this.checked; });
+    cbRow.appendChild(syncCb);
+    var syncLbl = el('label'); syncLbl.textContent = '同步更改 qBittorrent 密码';
+    syncLbl.setAttribute('for', 'sync-qb-pw');
+    cbRow.appendChild(syncLbl);
+    card.appendChild(cbRow);
+
+    // Summary.
+    var summary = el('div', 'summary-section');
+    summary.innerHTML = '<h3>配置确认</h3>' +
+      '<div class="summary-item"><span class="summary-label">qBittorrent</span><span class="summary-value">admin@qbittorrent:8080</span></div>' +
+      '<div class="summary-item"><span class="summary-label">源站</span><span class="summary-value">星陨阁 · pt.internal-source.org</span></div>';
+    // Target summary.
+    var enabledTargets = presetSites.filter(function(s) {
+      var t = fd.targets[s.name];
+      return t && t.enabled;
+    });
+    if (enabledTargets.length > 0) {
+      enabledTargets.forEach(function(s) {
+        summary.innerHTML += '<div class="summary-item"><span class="summary-label">目标站</span><span class="summary-value">' + s.name + ' (' + s.typeLabel + ')</span></div>';
+      });
+    } else {
+      summary.innerHTML += '<div class="summary-item"><span class="summary-label">目标站</span><span class="summary-value muted">(未启用)</span></div>';
+    }
+    if (fd.web_password) {
+      summary.innerHTML += '<div class="summary-item"><span class="summary-label">Web 面板密码</span><span class="summary-value" id="summary-web-pw">' + fd.web_password + '</span></div>';
+    }
+    if (fd.sync_qb_password && fd.web_password) {
+      summary.innerHTML += '<div class="summary-item"><span class="summary-label">qB 密码同步</span><span class="summary-value" style="color:var(--success)">是</span></div>';
+    }
+    card.appendChild(summary);
+
+    var result = testDiv('complete-result');
+    card.appendChild(result);
+
+    var btnGroup = el('div', 'btn-group');
+    var backBtn = el('button', 'btn btn-outline'); backBtn.textContent = '上一步';
+    backBtn.addEventListener('click', function() { goStep(3); });
+    btnGroup.appendChild(backBtn);
+    var doneBtn = el('button', 'btn btn-primary'); doneBtn.textContent = '完成初始化';
+    doneBtn.addEventListener('click', complete);
+    btnGroup.appendChild(doneBtn);
+    card.appendChild(btnGroup);
+  }
+
+  function complete() {
+    var doneBtn = document.querySelector('#card .btn-primary');
+    doneBtn.disabled = true;
+    doneBtn.innerHTML = '<span class="spinner"></span>保存配置中...';
+    clearTestResult('complete-result');
+
+    api('POST', '/api/setup/complete', {
+      web_password: fd.web_password || '',
+      sync_qb_password: fd.sync_qb_password,
+    }).then(function(data) {
+      if (data.ok) {
+        setTestResult('complete-result', true, '初始化完成！正在跳转到仪表盘...');
+        setTimeout(function() { window.location.href = '/'; }, 1500);
+      } else {
+        doneBtn.disabled = false;
+        doneBtn.textContent = '完成初始化';
+        setTestResult('complete-result', false, '保存失败: ' + (data.error || '未知错误'));
+      }
+    }).catch(function(err) {
+      doneBtn.disabled = false;
+      doneBtn.textContent = '完成初始化';
+      setTestResult('complete-result', false, '请求失败: ' + err.message);
+    });
+  }
+
+  // ---- Init ----
+
+  function init() {
+    // Check status and jump to the last incomplete step.
+    api('GET', '/api/setup/status').then(function(s) {
+      if (s.initialized) { window.location.href = '/'; return; }
+      if (s.steps) {
+        if (s.steps.qb && s.steps.qb.done) status.qb = true;
+        if (s.steps.source && s.steps.source.done) status.source = true;
+        if (s.steps.targets && s.steps.targets.done) status.targets = true;
+      }
+      updateStepper();
+      var startStep = 1;
+      if (status.qb && status.source && status.targets) startStep = 4;
+      else if (status.qb && status.source) startStep = 3;
+      else if (status.qb) startStep = 2;
+      goStep(startStep);
+    }).catch(function() { goStep(1); });
+  }
+
+  init();
+})();
+</script>
+</body>
+</html>

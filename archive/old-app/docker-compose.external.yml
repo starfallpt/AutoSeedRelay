@@ -1,0 +1,13 @@
+services:
+  relay:
+    build: .
+    ports:
+      - "9020:9020"
+    environment:
+      - QB_HOST=http://192.168.1.100:9021
+      - QB_USER=admin
+      - QB_PASS=yourpassword
+      - TZ=Asia/Shanghai
+    volumes:
+      - ./data:/data
+    restart: unless-stopped

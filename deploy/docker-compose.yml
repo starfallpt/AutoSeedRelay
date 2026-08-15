@@ -1,0 +1,19 @@
+# AutoSeedRelay v4 — 单容器部署（qB 外部连接）
+# 用法：编辑 .env（可选）后 docker compose up -d
+services:
+  relay:
+    image: ghcr.io/starfallpt/autoseedrelay:latest
+    container_name: autoseedrelay
+    ports:
+      - "9020:9020"
+    volumes:
+      - relay-data:/data
+    environment:
+      # 首次启动前设置面板密码；不设则登录接口拒绝服务（向导/初始化前）
+      AUTOSEED_WEB_PASSWORD: ${AUTOSEED_WEB_PASSWORD:-}
+      # 凭据加密主密钥（64位hex）；留空则首启自动生成到 /data/master.key
+      AUTOSEED_MASTER_KEY: ${AUTOSEED_MASTER_KEY:-}
+    restart: unless-stopped
+
+volumes:
+  relay-data:

@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AutoSeedRelay - Seeds</title>
+<style>
+:root {
+  --bg: #0f1117; --card: #1a1d27; --border: #2a2d3a;
+  --text: #e1e4eb; --muted: #8b8fa3; --accent: #6366f1;
+  --green: #22c55e; --red: #ef4444; --yellow: #eab308; --blue: #3b82f6;
+}
+body { margin:0; font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; background:var(--bg); color:var(--text); }
+nav { display:flex; gap:8px; padding:12px 20px; background:var(--card); border-bottom:1px solid var(--border); }
+nav a { color:var(--muted); text-decoration:none; padding:6px 14px; border-radius:6px; font-size:14px; }
+nav a:hover, nav a.active { color:var(--text); background:var(--accent); }
+main { max-width:1400px; margin:0 auto; padding:24px 20px; }
+.toolbar { display:flex; gap:12px; margin-bottom:16px; flex-wrap:wrap; }
+.toolbar input, .toolbar select { background:var(--card); color:var(--text); border:1px solid var(--border); border-radius:6px; padding:6px 12px; font-size:13px; }
+.toolbar input { flex:1; min-width:200px; }
+table { width:100%; border-collapse:collapse; background:var(--card); border-radius:10px; overflow:hidden; }
+th { text-align:left; padding:8px 10px; font-size:11px; color:var(--muted); text-transform:uppercase; border-bottom:1px solid var(--border); }
+td { padding:8px 10px; font-size:12px; border-bottom:1px solid var(--border); }
+tr:hover { background:rgba(99,102,241,0.05); }
+.btn { background:var(--accent); color:#fff; border:none; padding:4px 10px; border-radius:4px; font-size:11px; cursor:pointer; }
+.btn:hover { opacity:0.85; }
+.badge { display:inline-block; padding:2px 7px; border-radius:9px; font-size:10px; }
+.bg-seeding { background:rgba(34,197,94,0.15); color:var(--green); }
+.bg-downloading { background:rgba(59,130,246,0.15); color:var(--blue); }
+.bg-failed { background:rgba(239,68,68,0.15); color:var(--red); }
+.bg-pending { background:rgba(234,179,8,0.15); color:var(--yellow); }
+.pagination { display:flex; gap:8px; justify-content:center; margin-top:16px; }
+.pagination button { background:var(--card); color:var(--text); border:1px solid var(--border); padding:6px 14px; border-radius:6px; cursor:pointer; }
+.pagination button:hover { background:var(--accent); }
+</style>
+</head>
+<body>
+<nav>
+  <a href="/">Dashboard</a>
+  <a href="/seeds" class="active">Seeds</a>
+  <a href="/config">Config</a>
+  <a href="/logs">Logs</a>
+  <a href="/qb/" target="_blank">qB</a>
+</nav>
+<main>
+  <div class="toolbar">
+    <input type="text" id="search" placeholder="Search title..." oninput="load()">
+    <select id="status-filter" onchange="load()">
+      <option value="">All status</option>
+      <option value="downloading">Downloading</option>
+      <option value="seeding">Seeding</option>
+      <option value="pending">Pending</option>
+      <option value="failed">Failed</option>
+      <option value="retired">Retired</option>
+    </select>
+  </div>
+  <table>
+    <thead><tr>
+      <th>Title</th><th>InfoHash</th><th>Source</th><th>Target</th>
+      <th>Progress</th><th>Ratio</th><th>Status</th><th>Actions</th>
+    </tr></thead>
+    <tbody id="seeds-body"><tr><td colspan="8">Loading...</td></tr></tbody>
+  </table>
+  <div class="pagination" id="pagination"></div>
+</main>
+<script>
+let page = 1;
+const limit = 50;
+
+async function load() {
+  const q = document.getElementById('search').value;
+  const status = document.getElementById('status-filter').value;
+  try {
+    const r = await fetch('/api/seeds?q=' + encodeURIComponent(q) + '&status=' + status + '&page=' + page + '&limit=' + limit);
+    const d = await r.json();
+    const seeds = d.seeds || [];
+    const rows = seeds.map(s => {
+      let badge = 'bg-seeding';
+      if (s.status === 'downloading') badge = 'bg-downloading';
+      if (s.status === 'failed') badge = 'bg-failed';
+      if (s.status === 'pending') badge = 'bg-pending';
+      const pct = s.progress ? (s.progress * 100).toFixed(0) + '%' : '-';
+      return '<tr>' +
+        '<td>' + (s.title || '').slice(0, 60) + '</td>' +
+        '<td style="font-family:monospace;font-size:10px">' + (s.info_hash || '').slice(0,12) + '</td>' +
+        '<td>' + (s.source_site || '-') + '</td>' +
+        '<td>' + (s.target_site || '-') + '</td>' +
+        '<td>' + pct + '</td>' +
+        '<td>' + (s.ratio ? s.ratio.toFixed(2) : '-') + '</td>' +
+        '<td><span class="badge ' + badge + '">' + s.status + '</span></td>' +
+        '<td><button class="btn" onclick="retire(' + s.id + ')">Retire</button> <button class="btn" onclick="retry(' + s.id + ')">Retry</button></td>' +
+        '</tr>';
+    });
+    document.getElementById('seeds-body').innerHTML = rows.join('') || '<tr><td colspan="8">No seeds found</td></tr>';
+
+    const totalPages = Math.ceil((d.total || 0) / limit);
+    let pag = '';
+    if (page > 1) pag += '<button onclick="goPage(' + (page-1) + ')">Prev</button>';
+    pag += '<span style="padding:6px 12px">Page ' + page + ' / ' + (totalPages || 1) + '</span>';
+    if (page < totalPages) pag += '<button onclick="goPage(' + (page+1) + ')">Next</button>';
+    document.getElementById('pagination').innerHTML = pag;
+  } catch(e) { console.error(e); }
+}
+
+function goPage(p) { page = p; load(); }
+async function retire(id) { if(!confirm('Retire seed #'+id+'?')) return; await fetch('/api/seeds/'+id+'/retire', {method:'POST'}); load(); }
+async function retry(id) { if(!confirm('Retry seed #'+id+'?')) return; await fetch('/api/seeds/'+id+'/retry', {method:'POST'}); load(); }
+
+load();
+setInterval(load, 15000);
+</script>
+</body>
+</html>

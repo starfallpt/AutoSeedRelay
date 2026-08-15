@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AutoSeedRelay - Logs</title>
+<style>
+:root {
+  --bg: #0f1117; --card: #1a1d27; --border: #2a2d3a;
+  --text: #e1e4eb; --muted: #8b8fa3; --accent: #6366f1;
+  --green: #22c55e; --red: #ef4444; --yellow: #eab308;
+}
+body { margin:0; font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; background:var(--bg); color:var(--text); }
+nav { display:flex; gap:8px; padding:12px 20px; background:var(--card); border-bottom:1px solid var(--border); }
+nav a { color:var(--muted); text-decoration:none; padding:6px 14px; border-radius:6px; font-size:14px; }
+nav a:hover, nav a.active { color:var(--text); background:var(--accent); }
+main { max-width:1200px; margin:0 auto; padding:24px 20px; }
+.toolbar { display:flex; gap:12px; margin-bottom:16px; align-items:center; }
+.toolbar select { background:var(--card); color:var(--text); border:1px solid var(--border); border-radius:6px; padding:6px 12px; font-size:13px; }
+.btn { background:var(--accent); color:#fff; border:none; padding:6px 14px; border-radius:6px; font-size:13px; cursor:pointer; }
+.btn:hover { opacity:0.85; }
+.logs { background:var(--card); border:1px solid var(--border); border-radius:10px; padding:16px; font-family:'Cascadia Code','Fira Code',monospace; font-size:12px; max-height:70vh; overflow-y:auto; }
+.log-line { padding:3px 0; white-space:pre-wrap; word-break:break-all; }
+.log-ts { color:var(--muted); margin-right:8px; }
+.log-INFO { color:var(--green); }
+.log-WARN { color:var(--yellow); }
+.log-ERROR { color:var(--red); }
+.log-DEBUG { color:var(--muted); }
+</style>
+</head>
+<body>
+<nav>
+  <a href="/">Dashboard</a>
+  <a href="/seeds">Seeds</a>
+  <a href="/config">Config</a>
+  <a href="/logs" class="active">Logs</a>
+  <a href="/qb/" target="_blank">qB</a>
+</nav>
+<main>
+  <div class="toolbar">
+    <select id="level" onchange="load()">
+      <option value="">All</option>
+      <option value="INFO">INFO</option>
+      <option value="WARN">WARN</option>
+      <option value="ERROR">ERROR</option>
+    </select>
+    <button class="btn" onclick="load()">Refresh</button>
+  </div>
+  <div class="logs" id="log-body">Loading...</div>
+</main>
+<script>
+async function load() {
+  const level = document.getElementById('level').value;
+  try {
+    const r = await fetch('/api/logs?n=200&level=' + level);
+    const d = await r.json();
+    const lines = (d.logs || []).reverse().map(l => {
+      const ts = l.timestamp ? l.timestamp.slice(11,19) : '';
+      return '<div class="log-line"><span class="log-ts">' + ts + '</span><span class="log-' + l.level + '">[' + l.level + ']</span> ' + escapeHtml(l.message) + '</div>';
+    });
+    document.getElementById('log-body').innerHTML = lines.join('') || '<div>No logs</div>';
+  } catch(e) { console.error(e); }
+}
+function escapeHtml(s) { return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+load();
+setInterval(load, 5000);
+</script>
+</body>
+</html>

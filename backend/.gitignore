@@ -1,0 +1,10 @@
+# Sandbox-safe local Go caches (set GOCACHE/GOPATH here before building)
+.gocache/
+.gopath/
+
+# Local runtime data (SQLite db etc.)
+data/
+
+# Built binaries
+relay.exe
+relay

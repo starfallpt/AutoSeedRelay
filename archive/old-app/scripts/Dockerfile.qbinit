@@ -1,0 +1,16 @@
+FROM alpine:3.20
+RUN apk add --no-cache curl
+COPY <<'SCRIPT' /init.sh
+#!/bin/sh
+# Wait for qB API
+for i in $(seq 1 60); do
+  if curl -s -o /dev/null http://qbittorrent:8080/api/v2/app/version; then break; fi
+  sleep 2
+done
+# Get temp password from qB logs via docker API (read from /var/run/docker.sock not available)
+# Instead: try common defaults, then give up (relay will retry)
+# Best approach: qB already has CHANGE_ME from pre-created config
+echo "qB init done"
+SCRIPT
+RUN chmod +x /init.sh
+CMD ["/init.sh"]

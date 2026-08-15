@@ -1,0 +1,134 @@
+AutoSeedRelay VPS 状态检查报告
+检查时间: 2026-08-12 20:47:54
+目标 VPS: 1.2.3.4:XXXX
+
+============================================================
+  1. 容器状态 (docker ps)
+============================================================
+NAMES           STATUS                 PORTS
+autoseedrelay   Up 11 minutes          0.0.0.0:9020->9020/tcp, [::]:9020->9020/tcp
+qbittorrent     Up 2 hours (healthy)   127.0.0.1:9021->8080/tcp
+============================================================
+  2. qB 登录日志 (docker logs autoseedrelay)
+============================================================
+(未找到 qb login 相关日志)
+
+============================================================
+  3. Web 面板 (curl localhost:9020/)
+============================================================
+HTTP 状态码: HTTP 302
+响应内容 (前20行):
+<a href="/login">Found</a>.
+
+============================================================
+  4. 登录 API (POST /api/login)
+============================================================
+{"error":"密码错误","ok":false}
+
+HTTP_CODE: 401
+
+============================================================
+  5. qB 代理 (curl localhost:9020/qb/)
+============================================================
+HTTP 状态码: HTTP 502
+响应内容 (前20行):
+QB proxy: login failed: qb proxy login: no SID cookie, status=204 body=
+
+============================================================
+  6. 磁盘空间 (df -h)
+============================================================
+Filesystem                         Size  Used Avail Use% Mounted on
+tmpfs                              392M  1.3M  391M   1% /run
+/dev/mapper/ubuntu--vg-ubuntu--lv  195G   16G  171G   9% /
+tmpfs                              2.0G     0  2.0G   0% /dev/shm
+tmpfs                              5.0M     0  5.0M   0% /run/lock
+/dev/sda2                          2.0G  199M  1.6G  11% /boot
+overlay                            195G   16G  171G   9% /var/lib/docker/rootfs/overlayfs/08db243ea3f0b4959c4db9be2fae63632d94a27a2f0a8dad9c008d581090428c
+overlay                            195G   16G  171G   9% /var/lib/docker/rootfs/overlayfs/f09c716fbf66cc9aa2d749c38538d37e14268e9c78b6b3e92eee1849ff19abd5
+tmpfs                              392M   12K  392M   1% /run/user/0
+============================================================
+  7. 内存 (free -h)
+============================================================
+total        used        free      shared  buff/cache   available
+Mem:           3.8Gi       893Mi       886Mi       812Ki       2.4Gi       3.0Gi
+Swap:          3.8Gi        42Mi       3.8Gi
+============================================================
+  8. 配置文件 (/opt/AutoSeedRelay/config/relay.yaml)
+============================================================
+sources:
+    - name: 星陨阁
+      role: source
+      base_url: https://pt.internal-source.org
+      rss_url: https://pt.internal-source.org/torrentrss.php?passkey=ddb17974e67d63f1cecd7f76efaa1c2f
+      cookie: c_secure_pass=eyJ1c2VyX2lkIjoiMSIsImV4cGlyZXMiOjE3OTY5OTk1NjZ9LmE1MGYyMGIxMzk3YjRhYjhhOWE1Y2IxYmRjN2FmYWU3MjdiOGYzNTkwNmVkMzNmZTg5MmE0ZmQ1YWZmNjQ4NTA%3D
+      passkey: ddb17974e67d63f1cecd7f76efaa1c2f
+targets:
+    - name: dev.internal-source.org
+      role: target
+      base_url: https://dev.internal-source.org
+      cookie: c_secure_pass=eyJ1c2VyX2lkIjoiMSIsImV4cGlyZXMiOjE3OTg0NDQ4MjF9LmVmNzk5NjBlNjI1NTlkNTdmOGEwMDllNTY5ODE5ZmY1NzI4OGJmYzJlMTdlMzE5ZTllZWJkMGRlYTZkZjJmOTQ%3D
+      passkey: e69d2a24d28952c34aec904527ab2d72
+qb:
+    host: qbittorrent
+    port: 8080
+    username: admin
+    password: '***'
+    use_ssl: false
+strategy:
+    promotions:
+        - free
+        - 2x_free
+    keywords:
+        - StarfallWeb
+    min_size: 0
+    max_size: 0
+    role: publisher
+    max_concurrent: 3
+    download_timeout: 3600
+    retry_count: 3
+    retry_interval: 300
+    low_speed_kbps: 100
+    low_speed_duration: 600
+    low_speed_action: abort
+retire:
+    min_seeders: 5
+    min_ratio: 2
+    min_days: 14
+    delete_files: false
+monitor:
+    interval_seconds: 600
+    disk_low_gb: 50
+    disk_critical_gb: 20
+    site_backoff_base: 60
+    site_backoff_max: 900
+    site_max_failures: 5
+web:
+    listen_addr: :9020
+    password: ""
+poll_interval: 300
+keywords:
+    - StarfallWeb
+    - LongWeb
+db_path: /data/relay.db
+workdir: data
+torrents_dir: data/torrents
+log_level: info
+
+============================================================
+  9. 数据库 (/opt/AutoSeedRelay/data/relay.db)
+============================================================
+total 80K
+drwxr-xr-x 2 qbittorrent qbittorrent 4.0K Aug 12 05:04 downloads
+drwxr-xr-x 3 qbittorrent qbittorrent 4.0K Aug 12 10:53 qb-config
+-rw-r--r-- 1 root        root         40K Aug 12 10:54 relay.db
+-rw-r--r-- 1 root        root         32K Aug 12 12:36 relay.db-shm
+-rw-r--r-- 1 root        root           0 Aug 12 12:36 relay.db-wal
+
+============================================================
+  额外. Docker 镜像信息
+============================================================
+REPOSITORY                            TAG       SIZE
+ghcr.io/starfallpt/autoseedrelay      latest    34.8MB
+qbittorrentofficial/qbittorrent-nox   latest    286MB
+lscr.io/linuxserver/qbittorrent       latest    290MB
+hello-world                           latest    25.9kB

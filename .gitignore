@@ -1,0 +1,20 @@
+# 运行时数据（测试样本除外）
+data/*
+!data/relay_test/
+.env
+
+# 构建缓存
+.gocache/
+.gopath/
+.npm-cache/
+.pytest_cache/
+backend/.gocache/
+backend/.gopath/
+frontend/.npm-cache/
+frontend/node_modules/
+frontend/dist/
+
+# 二进制与种子文件（测试样本除外）
+*.exe
+*.torrent
+!data/relay_test/*.torrent

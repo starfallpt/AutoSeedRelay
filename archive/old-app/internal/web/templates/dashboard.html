@@ -1,0 +1,70 @@
+{{/* dashboard.html — 仪表盘页面 */}}
+{{define "title"}}仪表盘 - AutoSeedRelay{{end}}
+
+{{define "content"}}
+{{/* 统计卡片行 */}}
+<div class="stats-row" id="stats-row">
+    <div class="stat-card">
+        <div class="stat-value green" id="stat-total-publish">-</div>
+        <div class="stat-label">累计发布</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-value blue" id="stat-total-cross">-</div>
+        <div class="stat-label">累计辅种</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-value blue" id="stat-seeding">-</div>
+        <div class="stat-label">当前做种</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-value green" id="stat-disk">-</div>
+        <div class="stat-label">磁盘剩余</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-value green" id="stat-today-publish">-</div>
+        <div class="stat-label">今日发布</div>
+    </div>
+    <div class="stat-card">
+        <div class="stat-value blue" id="stat-today-cross">-</div>
+        <div class="stat-label">今日辅种</div>
+    </div>
+</div>
+
+{{/* 异常队列 */}}
+<div class="card">
+    <div class="card-header">
+        <span class="card-title">异常队列</span>
+    </div>
+    <div id="alert-queue">
+        <div class="empty-state">
+            <div class="empty-text">暂无异常</div>
+        </div>
+    </div>
+</div>
+
+{{/* 最近活动 */}}
+<div class="card">
+    <div class="card-header">
+        <span class="card-title">最近活动</span>
+        <span class="text-sm text-muted">每 30s 自动刷新</span>
+    </div>
+    <div class="table-container">
+        <table>
+            <thead>
+                <tr>
+                    <th>时间</th>
+                    <th>标题</th>
+                    <th>目标站</th>
+                    <th>动作</th>
+                    <th>结果</th>
+                </tr>
+            </thead>
+            <tbody id="recent-activity">
+                <tr>
+                    <td colspan="5" class="text-center text-muted">加载中...</td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+</div>
+{{end}}

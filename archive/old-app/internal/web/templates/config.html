@@ -1,0 +1,184 @@
+{{/* config.html — 配置页面（卡片布局，每节独立保存） */}}
+{{define "title"}}配置 - AutoSeedRelay{{end}}
+
+{{define "content"}}
+<div class="config-page">
+
+    {{/* ========== 标签栏 ========== */}}
+    <div class="config-tabs">
+        <button class="config-tab active" data-tab="source">源站</button>
+        <button class="config-tab" data-tab="targets">目标站</button>
+        <button class="config-tab" data-tab="qb">qBittorrent</button>
+        <button class="config-tab" data-tab="filter">筛选策略</button>
+        <button class="config-tab" data-tab="retire">撤种策略</button>
+    </div>
+
+    <div class="config-content">
+
+        {{/* ========== 源站 ========== */}}
+        <div class="config-section active" id="sec-source">
+        <div class="config-card">
+            <div class="config-card-header">
+                <span class="config-card-icon">&#x1F4E1;</span>
+                <span class="config-card-title">源站 — 星陨阁</span>
+            </div>
+            <div class="source-preset">
+                <span class="preset-header">星陨阁</span>
+                <span class="preset-url" style="margin-left:12px">https://pt.internal-source.org</span>
+                <span class="text-muted" style="margin-left:8px;font-size:12px">固定</span>
+            </div>
+            <div class="form-group-inline">
+                <label for="cfg-src-cookie">Cookie</label>
+                <input type="text" class="form-input" id="cfg-src-cookie" placeholder="登录会话Cookie">
+            </div>
+            <div class="form-group-inline">
+                <label for="cfg-src-passkey">Passkey</label>
+                <input type="text" class="form-input" id="cfg-src-passkey" placeholder="990794a23160ba...">
+            </div>
+            <div class="form-group-inline">
+                <label for="cfg-src-token">API Token</label>
+                <input type="text" class="form-input" id="cfg-src-token" placeholder="92|Dg7w5hdyIr0hr...">
+            </div>
+            <div class="form-actions">
+                <button class="btn btn-primary config-save-btn" data-section="source">保存</button>
+            </div>
+        </div>
+        </div>
+
+        {{/* ========== 目标站（JS 动态渲染卡片） ========== */}}
+        <div class="config-section" id="sec-targets">
+        <div class="config-card">
+            <div class="config-card-header">
+                <span class="config-card-icon">&#x1F3AF;</span>
+                <span class="config-card-title">目标站</span>
+            </div>
+            <div id="config-targets-list">
+                <div class="empty-state"><div class="empty-text">加载中...</div></div>
+            </div>
+        </div>
+        </div>
+
+        {{/* ========== qBittorrent ========== */}}
+        <div class="config-section" id="sec-qb">
+        <div class="config-card">
+            <div class="config-card-header">
+                <span class="config-card-icon">&#x1F5C4;</span>
+                <span class="config-card-title">qBittorrent</span>
+            </div>
+            <div class="form-group-inline">
+                <label for="cfg-qb-host">地址</label>
+                <input type="text" id="cfg-qb-host" class="form-input" placeholder="http://qbittorrent:8080">
+            </div>
+            <div class="form-group-inline">
+                <label for="cfg-qb-user">用户名</label>
+                <input type="text" id="cfg-qb-user" class="form-input" placeholder="admin">
+            </div>
+            <div class="form-group-inline">
+                <label for="cfg-qb-pass">密码</label>
+                <input type="password" id="cfg-qb-pass" class="form-input" placeholder="qB 密码">
+            </div>
+            <div class="form-group-inline">
+                <label for="cfg-qb-dl-path">下载路径</label>
+                <input type="text" id="cfg-qb-dl-path" class="form-input" placeholder="/downloads">
+            </div>
+            <div class="form-group-inline">
+                <label for="cfg-qb-max-active">最大并发</label>
+                <input type="number" id="cfg-qb-max-active" class="form-input" value="3" min="1" max="99" style="width:100px">
+            </div>
+            <div class="form-actions">
+                <button class="btn btn-outline test-conn-btn" data-type="qb">测试连接</button>
+                <button class="btn btn-primary config-save-btn" data-section="qbittorrent">保存</button>
+            </div>
+        </div>
+        </div>
+
+        {{/* ========== 筛选策略 ========== */}}
+        <div class="config-section" id="sec-filter">
+        <div class="config-card">
+            <div class="config-card-header">
+                <span class="config-card-icon">&#x1F50D;</span>
+                <span class="config-card-title">筛选策略</span>
+            </div>
+            <div class="form-group-inline">
+                <label>促销类型</label>
+                <div class="form-row-inline">
+                    <label class="form-check"><input type="checkbox" id="cfg-discount-free" checked> FREE</label>
+                    <label class="form-check"><input type="checkbox" id="cfg-discount-2xfree" checked> 2X Free</label>
+                    <label class="form-check"><input type="checkbox" id="cfg-discount-50"> 50%</label>
+                    <label class="form-check"><input type="checkbox" id="cfg-discount-30"> 30%</label>
+                    <label class="form-check"><input type="checkbox" id="cfg-discount-normal"> 普通</label>
+                </div>
+            </div>
+            <div class="form-group-inline">
+                <label for="cfg-keywords">关键词</label>
+                <input type="text" id="cfg-keywords" class="form-input" placeholder="用逗号分隔，如 StarfallWeb, LongWeb">
+            </div>
+            <div class="form-group-inline">
+                <label for="cfg-min-size">最小大小</label>
+                <div class="form-row-inline">
+                    <input type="number" id="cfg-min-size" class="form-input" value="0" style="width:100px">
+                    <span class="form-suffix">MB</span>
+                </div>
+            </div>
+            <div class="form-group-inline">
+                <label for="cfg-max-size">最大大小</label>
+                <div class="form-row-inline">
+                    <input type="number" id="cfg-max-size" class="form-input" value="0" style="width:100px">
+                    <span class="form-suffix">GB (0=不限)</span>
+                </div>
+            </div>
+            <div class="form-group-inline">
+                <label>角色</label>
+                <div class="form-row-inline">
+                    <label class="form-check"><input type="radio" name="cfg-role" value="publisher" checked> 发布者</label>
+                    <label class="form-check"><input type="radio" name="cfg-role" value="crossseeder"> 辅种者</label>
+                </div>
+            </div>
+            <div class="form-actions">
+                <button class="btn btn-primary config-save-btn" data-section="filter">保存</button>
+            </div>
+        </div>
+        </div>
+
+        {{/* ========== 撤种策略 ========== */}}
+        <div class="config-section" id="sec-retire">
+        <div class="config-card">
+            <div class="config-card-header">
+                <span class="config-card-icon">&#x1F5D1;</span>
+                <span class="config-card-title">撤种策略 <span style="font-size:12px;color:var(--text-muted);font-weight:400">满足任一即撤种</span></span>
+            </div>
+            <div class="retire-row">
+                <label class="form-check"><input type="checkbox" id="cfg-retire-seeders"></label>
+                <span class="retire-label">做种人数</span>
+                <span class="retire-label">&ge;</span>
+                <input type="number" id="cfg-retire-seeders-val" class="form-input retire-input" value="5" min="1">
+                <span class="retire-label">撤种</span>
+            </div>
+            <div class="retire-row">
+                <label class="form-check"><input type="checkbox" id="cfg-retire-ratio"></label>
+                <span class="retire-label">分享率</span>
+                <span class="retire-label">&ge;</span>
+                <input type="number" id="cfg-retire-ratio-val" class="form-input retire-input" value="2.0" step="0.1" min="0">
+                <span class="retire-label">撤种</span>
+            </div>
+            <div class="retire-row">
+                <label class="form-check"><input type="checkbox" id="cfg-retire-days"></label>
+                <span class="retire-label">天数</span>
+                <span class="retire-label">&ge;</span>
+                <input type="number" id="cfg-retire-days-val" class="form-input retire-input" value="14" min="1">
+                <span class="retire-label">撤种</span>
+            </div>
+            <div class="retire-row">
+                <label class="form-check"><input type="checkbox" id="cfg-retire-delete-files"></label>
+                <span class="retire-label">撤种时删除文件</span>
+            </div>
+            <div class="form-actions">
+                <button class="btn btn-primary config-save-btn" data-section="retire">保存</button>
+            </div>
+        </div>
+        </div>
+
+    </div>
+
+</div>
+{{end}}

@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AutoSeedRelay - 登录</title>
+    <style>
+        *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+        :root {
+            --bg-primary: #1a1a2e;
+            --bg-card: #16213e;
+            --bg-input: #0d1b2a;
+            --accent: #0f3460;
+            --accent-bright: #2e86c1;
+            --text-primary: #e0e0e0;
+            --text-muted: #6c6c7c;
+            --border: #2a2a4a;
+            --danger: #e74c3c;
+        }
+
+        html, body {
+            height: 100%;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+                         "Microsoft YaHei", "Helvetica Neue", Arial, sans-serif;
+            font-size: 14px;
+            color: var(--text-primary);
+            background: var(--bg-primary);
+            -webkit-font-smoothing: antialiased;
+        }
+
+        .login-container {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .login-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 40px 36px;
+            width: 100%;
+            max-width: 380px;
+            box-shadow: 0 4px 24px rgba(0, 0, 0, 0.4);
+        }
+
+        .login-logo {
+            text-align: center;
+            margin-bottom: 8px;
+            font-size: 22px;
+            font-weight: 700;
+            color: var(--text-primary);
+            letter-spacing: 0.5px;
+        }
+
+        .login-subtitle {
+            text-align: center;
+            font-size: 12px;
+            color: var(--text-muted);
+            margin-bottom: 28px;
+        }
+
+        .login-card label {
+            display: block;
+            font-size: 13px;
+            font-weight: 500;
+            color: #a0a0b0;
+            margin-bottom: 6px;
+        }
+
+        .login-card input[type="password"] {
+            width: 100%;
+            padding: 10px 14px;
+            font-size: 14px;
+            font-family: inherit;
+            color: var(--text-primary);
+            background: var(--bg-input);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            outline: none;
+            transition: border-color 0.2s;
+        }
+
+        .login-card input[type="password"]:focus {
+            border-color: var(--accent-bright);
+            box-shadow: 0 0 0 2px rgba(46, 134, 193, 0.2);
+        }
+
+        .login-card input[type="password"]::placeholder {
+            color: #6c6c7c;
+        }
+
+        .login-card button {
+            width: 100%;
+            padding: 10px 0;
+            margin-top: 18px;
+            font-size: 14px;
+            font-weight: 600;
+            font-family: inherit;
+            color: #fff;
+            background: var(--accent);
+            border: 1px solid #1a5276;
+            border-radius: 6px;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+
+        .login-card button:hover {
+            background: #1a5276;
+        }
+
+        .login-card button:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+        }
+
+        .login-error {
+            margin-top: 14px;
+            font-size: 13px;
+            color: var(--danger);
+            text-align: center;
+            min-height: 20px;
+        }
+
+        .login-footer {
+            margin-top: 24px;
+            text-align: center;
+            font-size: 11px;
+            color: var(--text-muted);
+        }
+    </style>
+</head>
+<body>
+    <div class="login-container">
+        <div class="login-card">
+            <div class="login-logo">AutoSeedRelay</div>
+            <div class="login-subtitle">v3.0 Web 管理面板</div>
+            <form id="login-form" autocomplete="off">
+                <label for="password">密码</label>
+                <input type="password" id="password" placeholder="请输入管理密码" autofocus>
+                <button type="submit" id="login-btn">登 录</button>
+            </form>
+            <div class="login-error" id="login-error"></div>
+            <div class="login-footer">AutoSeedRelay v3.0</div>
+        </div>
+    </div>
+
+    <script>
+        (function () {
+            'use strict';
+
+            var form = document.getElementById('login-form');
+            var passwordInput = document.getElementById('password');
+            var btn = document.getElementById('login-btn');
+            var errorEl = document.getElementById('login-error');
+
+            form.addEventListener('submit', function (e) {
+                e.preventDefault();
+
+                var password = passwordInput.value.trim();
+                if (!password) {
+                    errorEl.textContent = '请输入密码';
+                    return;
+                }
+
+                btn.disabled = true;
+                btn.textContent = '验证中...';
+                errorEl.textContent = '';
+
+                fetch('/api/login', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ password: password }),
+                })
+                .then(function (r) { return r.json(); })
+                .then(function (data) {
+                    if (data.ok) {
+                        window.location.href = '/';
+                    } else {
+                        errorEl.textContent = data.error || '登录失败';
+                        btn.disabled = false;
+                        btn.textContent = '登 录';
+                        passwordInput.value = '';
+                        passwordInput.focus();
+                    }
+                })
+                .catch(function () {
+                    errorEl.textContent = '网络错误，请重试';
+                    btn.disabled = false;
+                    btn.textContent = '登 录';
+                });
+            });
+
+            // Listen for Enter key.
+            passwordInput.addEventListener('keydown', function (e) {
+                if (e.key === 'Enter') {
+                    form.dispatchEvent(new Event('submit'));
+                }
+            });
+        })();
+    </script>
+</body>
+</html>

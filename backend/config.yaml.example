@@ -1,0 +1,5 @@
+# AutoSeedRelay 部署级配置示例（复制为 config.yaml 后使用）
+# 环境变量（AUTOSEED_LISTEN_ADDR / AUTOSEED_LOG_LEVEL / AUTOSEED_DB_PATH）优先级高于本文件。
+listen_addr: ":9020"        # HTTP 监听地址
+log_level: "info"           # debug | info | warn | error
+db_path: "data/relay.db"    # SQLite 数据库路径（M0 仅占位，未接库）

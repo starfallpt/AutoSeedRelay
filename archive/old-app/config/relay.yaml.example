@@ -1,0 +1,73 @@
+# AutoSeedRelay 默认配置文件
+# 首次使用请通过 Web 面板完成设置，或手动编辑此文件后重启容器
+
+sources:
+  # 源站通过设置向导配置（Step 2）
+  # 固定为: 星陨阁 · https://pt.internal-source.org
+  # - name: 星陨阁
+  #   base_url: https://pt.internal-source.org
+  #   cookie: ""
+  #   passkey: ""
+
+targets:
+  # 目标站通过设置向导配置（Step 3）
+  # 预设目标站:
+  #   dev.internal-source.org (classic 表单) - Cookie + Passkey
+  #   luckpt.de (NexusPHP API)   - API Token
+  #   M-Team (mteam)            - API Token
+  # - name: dev.internal-source.org
+  #   base_url: https://dev.internal-source.org
+  #   cookie: ""
+  #   passkey: ""
+  # - name: luckpt.de
+  #   base_url: https://luckpt.de
+  #   api_token: ""
+  # - name: M-Team
+  #   base_url: https://api.m-team.cc/api
+  #   announce_url: https://tracker.m-team.cc/announce?credential={credential}
+  #   mteam_auth: ""
+
+qb:
+  host: "qbittorrent"
+  port: 8080
+  username: admin
+  password: CHANGE_ME
+
+strategy:
+  role: publisher
+  promotions:
+    - free
+    - 2x_free
+  keywords:
+    - StarfallWeb
+  min_size: 0
+  max_size: 0
+  max_concurrent: 3
+
+retire:
+  min_seeders: 5
+  min_ratio: 2.0
+  min_days: 14
+  delete_files: false
+
+monitor:
+  interval_seconds: 600
+  disk_low_gb: 50
+  disk_critical_gb: 20
+  download_timeout: 3600
+  retry_count: 3
+  retry_interval: 300
+  low_speed_kbps: 100
+  low_speed_duration: 600
+  low_speed_action: abort
+  site_backoff_base: 60
+  site_backoff_max: 900
+  site_max_failures: 3
+
+poll_interval: 300
+db_path: /data/relay.db
+log_level: info
+
+web:
+  listen_addr: ":9020"
+  password: "admin"  # Web 面板登录密码，强烈建议修改
