@@ -1,5 +1,6 @@
-// Package server assembles the Gin engine: middleware chain skeleton, route
-// registration, and request handlers. M0 ships only health + login placeholder.
+// Package server assembles the Gin engine: middleware chain, route
+// registration, and the auth/setup handlers. The v2 API surface (config + ops
+// domains) is mounted through Deps.RegisterAPI by the wiring layer.
 package server
 
 import (

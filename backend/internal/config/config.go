@@ -26,7 +26,7 @@ type Config struct {
 	ListenAddr string `yaml:"listen_addr"`
 	// LogLevel is one of debug|info|warn|error.
 	LogLevel string `yaml:"log_level"`
-	// DBPath is the SQLite database path (M0 placeholder, not connected yet).
+	// DBPath is the SQLite database path (data/relay.db by default).
 	DBPath string `yaml:"db_path"`
 }
 

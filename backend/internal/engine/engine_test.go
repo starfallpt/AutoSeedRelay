@@ -37,11 +37,29 @@ func testKey() []byte {
 
 func newTestRepo(t *testing.T) *store.Repo {
 	t.Helper()
-	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	// Self-managed temp dir (not t.TempDir): tests that start/stop the engine
+	// cancel in-flight SQLite queries, and on Windows modernc/sqlite can lag
+	// releasing the WAL/SHM file handles past db.Close. Removal is best-effort
+	// with retries so this environment quirk cannot fail the test.
+	dir, err := os.MkdirTemp("", "asr-engine-*")
 	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		_ = os.RemoveAll(dir)
 		t.Fatalf("store.Open: %v", err)
 	}
-	t.Cleanup(func() { _ = st.Close() })
+	t.Cleanup(func() {
+		_, _ = st.DB().Exec("PRAGMA wal_checkpoint(TRUNCATE)")
+		_ = st.Close()
+		for i := 0; i < 100; i++ {
+			if os.RemoveAll(dir) == nil {
+				return
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+	})
 	return store.NewRepo(st.DB(), testKey())
 }
 
@@ -113,6 +131,37 @@ func (f *fakePipeline) ids() []int64 {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]int64(nil), f.calls...)
+}
+
+// slowPipeline blocks in Relay until released (or ctx cancelled), recording
+// whether it observed cancellation. It models a long-running download/publish
+// so Stop's graceful-drain vs. force-cancel behavior can be asserted.
+type slowPipeline struct {
+	started   chan struct{}
+	startOnce sync.Once
+	release   chan struct{}
+
+	mu        sync.Mutex
+	cancelled bool
+}
+
+func (s *slowPipeline) Relay(ctx context.Context, _ int64) error {
+	s.startOnce.Do(func() { close(s.started) })
+	select {
+	case <-ctx.Done():
+		s.mu.Lock()
+		s.cancelled = true
+		s.mu.Unlock()
+		return ctx.Err()
+	case <-s.release:
+		return nil
+	}
+}
+
+func (s *slowPipeline) wasCancelled() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.cancelled
 }
 
 // recordingNotifier captures every delivered message.
@@ -761,6 +810,134 @@ func TestEngineStartStop(t *testing.T) {
 	}
 	if eng.Running() {
 		t.Fatal("engine still running after Stop")
+	}
+}
+
+func TestStartReclaimsMidFlightSeeds(t *testing.T) {
+	repo := newTestRepo(t)
+	eng := New(Config{Workers: 1}, repo, &fakePipeline{}, qb.NewManager(), nil)
+	eng.SetFetchRSS(func(_ context.Context, _ string, _ *http.Client) ([]source.RssItem, error) {
+		return nil, nil
+	})
+
+	// Seeds left mid-flight by an abnormal shutdown.
+	var ids []int64
+	for i, status := range []string{"downloading", "processing"} {
+		sd := &store.Seed{
+			SourceSite: "src",
+			InfoHash:   fmt.Sprintf("%040d", i+1),
+			Title:      "T",
+			Status:     status,
+		}
+		id, err := repo.CreateSeed(ctx, sd)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, id)
+	}
+
+	if err := eng.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = eng.Stop(ctx) }()
+
+	for _, id := range ids {
+		sd, err := repo.GetSeedByID(ctx, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if sd.Status != "retry" {
+			t.Fatalf("seed %d status = %q, want retry (reclaimed from mid-flight)", id, sd.Status)
+		}
+	}
+}
+
+func TestStopDrainsInFlightWorker(t *testing.T) {
+	repo := newTestRepo(t)
+	sp := &slowPipeline{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	eng := New(Config{Workers: 1, ShutdownTimeout: 5 * time.Second}, repo, sp, qb.NewManager(), nil)
+	eng.SetFetchRSS(func(_ context.Context, _ string, _ *http.Client) ([]source.RssItem, error) {
+		return nil, nil
+	})
+
+	sd := &store.Seed{SourceSite: "src", InfoHash: testHash, Title: "T", Status: "discovered"}
+	if _, err := repo.CreateSeed(ctx, sd); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := eng.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	eng.enqueue(ctx, sd.ID)
+	select {
+	case <-sp.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("worker never started the pipeline")
+	}
+
+	// Stop while the worker is mid-Relay. It must wait for the in-flight task
+	// to finish rather than cancel it immediately.
+	done := make(chan struct{})
+	go func() {
+		_ = eng.Stop(ctx)
+		close(done)
+	}()
+	select {
+	case <-done:
+		t.Fatal("Stop returned before the in-flight task was released")
+	case <-time.After(150 * time.Millisecond):
+		// still draining — expected
+	}
+
+	close(sp.release)
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Stop did not return after the in-flight task finished")
+	}
+	if sp.wasCancelled() {
+		t.Fatal("in-flight task was interrupted by Stop")
+	}
+}
+
+func TestStopForceCancelsAfterTimeout(t *testing.T) {
+	repo := newTestRepo(t)
+	sp := &slowPipeline{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	eng := New(Config{Workers: 1, ShutdownTimeout: 50 * time.Millisecond}, repo, sp, qb.NewManager(), nil)
+	eng.SetFetchRSS(func(_ context.Context, _ string, _ *http.Client) ([]source.RssItem, error) {
+		return nil, nil
+	})
+
+	sd := &store.Seed{SourceSite: "src", InfoHash: testHash, Title: "T", Status: "discovered"}
+	if _, err := repo.CreateSeed(ctx, sd); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := eng.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	eng.enqueue(ctx, sd.ID)
+	select {
+	case <-sp.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("worker never started the pipeline")
+	}
+
+	start := time.Now()
+	if err := eng.Stop(ctx); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed >= 3*time.Second {
+		t.Fatalf("Stop took %v, want bounded by shutdown timeout", elapsed)
+	}
+	if !sp.wasCancelled() {
+		t.Fatal("expected the in-flight task to be force-cancelled after the timeout")
 	}
 }
 

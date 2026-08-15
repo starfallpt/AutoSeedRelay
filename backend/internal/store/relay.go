@@ -96,7 +96,7 @@ func (r *Repo) MarkPublished(ctx context.Context, seedID, targetID int64, publis
 		UPDATE relay_records SET
 			status = 'published',
 			last_error = '',
-			published_at = CASE WHEN published_at = 0 THEN ? ELSE published_at END,
+			published_at = CASE WHEN published_at IS NULL OR published_at = 0 THEN ? ELSE published_at END,
 			updated_at = unixepoch()
 		WHERE seed_id = ? AND target_id = ?`, publishedAt, seedID, targetID)
 	if err != nil {

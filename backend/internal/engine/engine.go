@@ -34,12 +34,14 @@ type Config struct {
 	PollInterval    time.Duration // source RSS poll cadence
 	MonitorInterval time.Duration // qB monitor / retire cadence
 	Workers         int           // pipeline worker-pool concurrency
+	ShutdownTimeout time.Duration // graceful-shutdown drain budget before force-cancel
 }
 
 const (
 	defaultPollInterval    = 300 * time.Second
 	defaultMonitorInterval = 30 * time.Second
 	defaultWorkers         = 4
+	defaultShutdownTimeout = 30 * time.Second
 )
 
 // withDefaults normalizes a Config so every field has a usable value.
@@ -52,6 +54,9 @@ func (c Config) withDefaults() Config {
 	}
 	if c.Workers <= 0 {
 		c.Workers = defaultWorkers
+	}
+	if c.ShutdownTimeout <= 0 {
+		c.ShutdownTimeout = defaultShutdownTimeout
 	}
 	return c
 }
@@ -71,6 +76,13 @@ type Engine struct {
 	cancel      context.CancelFunc
 	wg          sync.WaitGroup
 	lifecycleMu sync.Mutex // serializes Start/Stop
+
+	// graceful shutdown: Stop first closes drainCh (gating new-task acceptance)
+	// and sets stopGraceful, then waits up to ShutdownTimeout for in-flight
+	// workers (workersWG) to finish before force-cancelling.
+	stopGraceful atomic.Bool
+	drainCh      chan struct{}
+	workersWG    sync.WaitGroup
 
 	// worker pool: seed ids waiting for a pipeline run.
 	jobs chan int64
@@ -100,9 +112,10 @@ type Engine struct {
 	fetchRSS   func(ctx context.Context, url string, client *http.Client) ([]source.RssItem, error)
 }
 
-// New builds an Engine. pl may be nil while the pipeline package is not yet
-// wired (main.go TODO(M2c)); a nil pipeline turns Relay into a logged no-op so
-// the rest of the engine still runs and is observable via /health.
+// New builds an Engine. pl may be nil during wiring (main constructs the engine
+// first, then injects the pipeline via SetPipeline before Start); a nil
+// pipeline turns Relay into a logged no-op so the rest of the engine still
+// runs and is observable via /health.
 func New(cfg Config, repo *store.Repo, pl Pipeline, qbMgr *qb.Manager, notif *notifier.Router) *Engine {
 	cfg = cfg.withDefaults()
 	if qbMgr == nil {
@@ -116,6 +129,7 @@ func New(cfg Config, repo *store.Repo, pl Pipeline, qbMgr *qb.Manager, notif *no
 		notif:      notif,
 		log:        slog.Default(),
 		jobs:       make(chan int64, cfg.Workers),
+		drainCh:    make(chan struct{}),
 		pollState:  make(map[int64]*sourceState),
 		diskState:  make(map[string]string),
 		now:        time.Now,
@@ -200,6 +214,11 @@ func (e *Engine) Start(ctx context.Context) error {
 	}
 	e.running.Store(true)
 
+	// Reset graceful-shutdown state for the new run (the previous Stop, if any,
+	// closed the drain channel and set the flag).
+	e.stopGraceful.Store(false)
+	e.drainCh = make(chan struct{})
+
 	// Rebuild the jobs channel so stale buffered ids from a previous run are
 	// dropped rather than replayed into the new worker pool.
 	e.jobs = make(chan int64, e.cfg.Workers)
@@ -207,10 +226,22 @@ func (e *Engine) Start(ctx context.Context) error {
 	ectx, cancel := context.WithCancel(ctx)
 	e.cancel = cancel
 
+	// Startup recovery: seeds left mid-flight by an abnormal shutdown (process
+	// killed between status transitions) sit in "downloading"/"processing" and
+	// would never be re-run. Reclaim them back to "retry" so the retry rebuild
+	// below re-enqueues them. store owns the seeds table and exposes no bulk
+	// reclaim method, so the engine drives the raw handle directly (the same
+	// pattern ResendSeed uses for its record cleanup).
+	if _, err := e.repo.DB().ExecContext(ectx,
+		`UPDATE seeds SET status = 'retry' WHERE status IN ('downloading','processing')`); err != nil {
+		e.log.Error("start: reclaim mid-flight seeds", "error", err)
+	}
+
 	e.rebuildRetryQueue(ectx)
 
 	for i := 0; i < e.cfg.Workers; i++ {
 		e.wg.Add(1)
+		e.workersWG.Add(1)
 		go e.workerLoop(ectx)
 	}
 	e.wg.Add(1)
@@ -234,8 +265,9 @@ func (e *Engine) Start(ctx context.Context) error {
 	return nil
 }
 
-// Stop gracefully shuts the engine down: cancels the derived context, flushes
-// pending notifications, and waits for all tracked goroutines to return. The
+// Stop gracefully shuts the engine down. It first stops accepting new tasks,
+// then drains in-flight workers up to ShutdownTimeout before force-cancelling,
+// then flushes pending notifications and waits for all tracked goroutines. The
 // running flag is cleared only after wg.Wait() returns, so a concurrent Start
 // during shutdown is still refused; Start/Stop are serialized by lifecycleMu.
 func (e *Engine) Stop(ctx context.Context) error {
@@ -245,6 +277,36 @@ func (e *Engine) Stop(ctx context.Context) error {
 	if !e.running.Load() {
 		return nil
 	}
+
+	// Phase 1: stop accepting new tasks. The poll/monitor/retry loops keep
+	// running (they exit on the cancel below), but enqueue drops new work and
+	// idle workers exit immediately; a worker mid-Relay finishes its current
+	// seed before exiting.
+	e.stopGraceful.Store(true)
+	close(e.drainCh)
+
+	// Phase 2: bounded drain of in-flight workers. We must NOT cancel the
+	// context here — cancelling would abort an in-flight Relay and misroute it
+	// into the retry path. Wait up to ShutdownTimeout for workers to finish on
+	// their own; on expiry, force-cancel as a fallback.
+	drained := make(chan struct{})
+	go func() {
+		e.workersWG.Wait()
+		close(drained)
+	}()
+	timer := time.NewTimer(e.cfg.ShutdownTimeout)
+	defer timer.Stop()
+	select {
+	case <-drained:
+	case <-timer.C:
+		if e.cancel != nil {
+			e.cancel()
+		}
+		<-drained // workers unwind after the force-cancel
+	}
+
+	// Stop the background loops, flush + stop the notifier, then wait for every
+	// tracked goroutine to return.
 	if e.cancel != nil {
 		e.cancel()
 	}
@@ -254,27 +316,44 @@ func (e *Engine) Stop(ctx context.Context) error {
 	}
 	e.wg.Wait()
 	e.running.Store(false)
+	e.stopGraceful.Store(false)
 	e.log.Info("engine stopped")
 	return nil
 }
 
 // enqueue hands a seed id to the worker pool, blocking (with ctx awareness)
-// until a worker is available or the engine shuts down.
+// until a worker is available, the engine shuts down, or a graceful drain
+// begins (in which case the seed is dropped and will be re-discovered next
+// round).
 func (e *Engine) enqueue(ctx context.Context, seedID int64) {
 	select {
 	case e.jobs <- seedID:
 	case <-ctx.Done():
+	case <-e.drainCh:
 	}
 }
 
 // workerLoop consumes the jobs channel and runs each seed through the pipeline.
+// It exits on context cancellation, on a graceful-drain signal (after finishing
+// any in-flight Relay), or when it observes the drain flag while picking a
+// buffered job.
 func (e *Engine) workerLoop(ctx context.Context) {
+	defer e.workersWG.Done()
 	defer e.wg.Done()
 	for {
 		select {
 		case <-ctx.Done():
 			return
+		case <-e.drainCh:
+			// Graceful drain: stop consuming. Idle workers exit here; a worker
+			// mid-Relay reaches this on its next iteration after finishing.
+			return
 		case id := <-e.jobs:
+			if e.stopGraceful.Load() {
+				// Drain began while a job was buffered: discard it rather than
+				// starting new work.
+				return
+			}
 			e.submitJob(ctx, id, 0)
 		}
 	}
