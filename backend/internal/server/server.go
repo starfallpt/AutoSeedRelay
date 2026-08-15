@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/autoseedrelay/relay/internal/config"
+	"github.com/autoseedrelay/relay/internal/engine"
+	"github.com/autoseedrelay/relay/internal/store"
 	"github.com/autoseedrelay/relay/internal/webfs"
 	"github.com/gin-gonic/gin"
 )
@@ -18,15 +20,23 @@ import (
 // Version is the backend release version for the M0 milestone.
 const Version = "0.1.0-m0"
 
+// Deps carries the runtime dependencies the health endpoint reports on. Every
+// field is optional (nil-safe), so M0-only wiring still works.
+type Deps struct {
+	Store  *store.Store
+	Engine *engine.Engine
+}
+
 // Server holds the wired Gin engine and deployment config.
 type Server struct {
 	cfg    *config.Config
 	logger *slog.Logger
 	engine *gin.Engine
+	deps   Deps
 }
 
 // New builds the Gin engine with the middleware chain and routes.
-func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
+func New(cfg *config.Config, logger *slog.Logger, deps Deps) (*Server, error) {
 	if cfg == nil {
 		cfg = config.Default()
 	}
@@ -38,7 +48,7 @@ func New(cfg *config.Config, logger *slog.Logger) (*Server, error) {
 	// Middleware chain (see docs/ARCHITECTURE-v4.md §10): Recovery → RequestID → slog.
 	engine.Use(Recovery(logger), RequestID(), SlogLogger(logger))
 
-	s := &Server{cfg: cfg, logger: logger, engine: engine}
+	s := &Server{cfg: cfg, logger: logger, engine: engine, deps: deps}
 	s.routes()
 	return s, nil
 }
@@ -65,11 +75,20 @@ func (s *Server) routes() {
 }
 
 func (s *Server) handleHealth(c *gin.Context) {
-	c.JSON(http.StatusOK, gin.H{
+	resp := gin.H{
 		"status":  "ok",
 		"version": Version,
 		"time":    time.Now().UTC().Format(time.RFC3339),
-	})
+	}
+	if s.deps.Store != nil {
+		if v, err := s.deps.Store.MigrateVersion(); err == nil {
+			resp["db_version"] = v
+		}
+	}
+	if s.deps.Engine != nil {
+		resp["engine"] = s.deps.Engine.Status()
+	}
+	c.JSON(http.StatusOK, resp)
 }
 
 // handleLogin is a placeholder for M0. It accepts {"password": "..."} and

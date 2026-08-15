@@ -46,6 +46,35 @@ func migrateEmbedded(db *sql.DB) error {
 	return migrateFS(sub, db)
 }
 
+// CurrentVersion returns the highest schema version shipped in this binary's
+// embedded migrations. A freshly opened store is migrated to exactly this
+// version, so it is the "current" schema version used by backup/restore
+// compatibility checks.
+func CurrentVersion() (int, error) {
+	sub, err := fs.Sub(migrationsFS, "migrations")
+	if err != nil {
+		return 0, fmt.Errorf("store: embedded migrations: %w", err)
+	}
+	entries, err := fs.ReadDir(sub, ".")
+	if err != nil {
+		return 0, fmt.Errorf("store: read migrations: %w", err)
+	}
+	max := 0
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".sql") {
+			continue
+		}
+		ver, err := parseVersion(e.Name())
+		if err != nil {
+			return 0, err
+		}
+		if ver > max {
+			max = ver
+		}
+	}
+	return max, nil
+}
+
 // migrateFS applies pending migrations from fsys (sorted by filename) whose
 // version is greater than the current PRAGMA user_version.
 func migrateFS(fsys fs.FS, db *sql.DB) error {

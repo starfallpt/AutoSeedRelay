@@ -203,6 +203,55 @@ func CleanTorrentForTarget(p *ParsedTorrent, announce, source string) (*ParsedTo
 	}, nil
 }
 
+// ReannounceTorrent deep-copies the torrent and points it at a new tracker
+// WITHOUT touching the info dictionary, so the info_hash is preserved. This
+// is the cross-seed torrent: the same swarm (identical info_hash) announced
+// to the target's tracker. announce-list/nodes/url-list/httpseeds/comment are
+// dropped; info.private / info.source / creation date are left byte-identical
+// (unlike CleanTorrentForTarget, which deliberately changes them). The
+// original ParsedTorrent is not modified.
+func ReannounceTorrent(p *ParsedTorrent, announce string) (*ParsedTorrent, error) {
+	if p == nil {
+		return nil, fmt.Errorf("parser: nil torrent")
+	}
+	newT, ok := deepCopy(p.RawDict).(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("parser: torrent must be a dict")
+	}
+	info, ok := newT["info"].(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("parser: torrent missing info dict")
+	}
+
+	newT["announce"] = announce
+	delete(newT, "announce-list")
+	delete(newT, "nodes")
+	delete(newT, "url-list")
+	delete(newT, "httpseeds")
+	delete(newT, "comment")
+
+	infoHash, err := bencode.InfoHash(newT)
+	if err != nil {
+		return nil, err
+	}
+
+	files := make([]FileInfo, len(p.Files))
+	copy(files, p.Files)
+
+	return &ParsedTorrent{
+		Name:         bstr(info["name"]),
+		Announce:     announce,
+		Private:      p.Private,
+		Source:       p.Source,
+		InfoHash:     infoHash,
+		Files:        files,
+		TotalSize:    p.TotalSize,
+		FileCount:    len(files),
+		CreationDate: p.CreationDate,
+		RawDict:      newT,
+	}, nil
+}
+
 // Summarize renders the file list as "path size" lines, truncated to at
 // most n entries.
 func Summarize(files []FileInfo, n int) string {

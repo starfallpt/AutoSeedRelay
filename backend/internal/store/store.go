@@ -18,6 +18,9 @@ import (
 // DriverName is the modernc SQLite driver name registered with database/sql.
 const DriverName = "sqlite"
 
+// DefaultDBPath is the database path used when none is configured.
+const DefaultDBPath = "data/relay.db"
+
 // Store is an open SQLite database handle. A single connection is used
 // (SetMaxOpenConns(1)) so connection-scoped PRAGMAs stay effective and all
 // writes are serialized.
@@ -30,7 +33,7 @@ type Store struct {
 // pending migrations, and verifies connectivity with a Ping.
 func Open(path string) (*Store, error) {
 	if path == "" {
-		path = "data/relay.db"
+		path = DefaultDBPath
 	}
 	if parent := filepath.Dir(path); parent != "" && parent != "." {
 		if err := os.MkdirAll(parent, 0o755); err != nil {
@@ -68,6 +71,15 @@ func Open(path string) (*Store, error) {
 	}
 
 	return &Store{db: db}, nil
+}
+
+// DB exposes the raw *sql.DB so a query-layer Repo can be constructed over the
+// same handle (see NewRepo). It returns nil once the store is closed.
+func (s *Store) DB() *sql.DB {
+	if s == nil {
+		return nil
+	}
+	return s.db
 }
 
 // Close closes the underlying database. It is safe to call more than once.

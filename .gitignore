@@ -18,3 +18,5 @@ frontend/dist/
 *.exe
 *.torrent
 !data/relay_test/*.torrent
+
+*.local.md

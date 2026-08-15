@@ -1,0 +1,682 @@
+package engine
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"path/filepath"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/autoseedrelay/relay/internal/qb"
+	"github.com/autoseedrelay/relay/internal/source"
+	"github.com/autoseedrelay/relay/internal/store"
+)
+
+var ctx = context.Background()
+
+const testHash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+// --- test helpers ---
+
+func testKey() []byte {
+	k := make([]byte, 32)
+	for i := range k {
+		k[i] = byte(i + 1)
+	}
+	return k
+}
+
+func newTestRepo(t *testing.T) *store.Repo {
+	t.Helper()
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	return store.NewRepo(st.DB(), testKey())
+}
+
+func rawCount(t *testing.T, repo *store.Repo, query string, args ...any) int {
+	t.Helper()
+	var n int
+	if err := repo.DB().QueryRow(query, args...).Scan(&n); err != nil {
+		t.Fatalf("raw count %q: %v", query, err)
+	}
+	return n
+}
+
+// fakeClock is a controllable, concurrency-safe time source.
+type fakeClock struct {
+	mu sync.Mutex
+	t  time.Time
+}
+
+func (c *fakeClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.t
+}
+
+func (c *fakeClock) Advance(d time.Duration) {
+	c.mu.Lock()
+	c.t = c.t.Add(d)
+	c.mu.Unlock()
+}
+
+// fakePipeline records Relay calls and returns a configurable error.
+type fakePipeline struct {
+	mu    sync.Mutex
+	calls []int64
+	err   error
+}
+
+func (f *fakePipeline) Relay(_ context.Context, seedID int64) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls = append(f.calls, seedID)
+	return f.err
+}
+
+func (f *fakePipeline) count() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.calls)
+}
+
+func (f *fakePipeline) ids() []int64 {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]int64(nil), f.calls...)
+}
+
+// fakeQB is an httptest-backed qB WebUI API with controllable torrent list and
+// disk space, and records delete calls.
+type fakeQB struct {
+	mu       sync.Mutex
+	torrents []*qb.TorrentInfo
+	freeDisk int64
+	deleted  []string
+}
+
+func (f *fakeQB) handler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v2/auth/login":
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v2/app/version":
+			io.WriteString(w, "v5.0.0")
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v2/torrents/info":
+			_ = json.NewEncoder(w).Encode(f.torrents)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v2/sync/maindata":
+			_, _ = fmt.Fprintf(w, `{"server_state":{"free_space_on_disk":%d}}`, f.freeDisk)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v2/torrents/delete":
+			_ = r.ParseForm()
+			f.deleted = append(f.deleted, r.PostFormValue("hashes"))
+			w.WriteHeader(http.StatusOK)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}
+}
+
+func (f *fakeQB) deleteCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.deleted)
+}
+
+// registerFakeQB inserts a qb row and registers an httptest-backed instance in
+// the manager, returning the DB id and the fake for assertions.
+func registerFakeQB(t *testing.T, repo *store.Repo, qbMgr *qb.Manager, name string, priority int64, torrents []*qb.TorrentInfo, freeDisk int64) (int64, *fakeQB) {
+	t.Helper()
+	fq := &fakeQB{torrents: torrents, freeDisk: freeDisk}
+	srv := httptest.NewServer(fq.handler())
+	t.Cleanup(srv.Close)
+
+	qi := &store.QBInstance{Name: name, Host: srv.URL, Port: 0, Username: "u", Password: "p", Priority: priority, Enabled: 1}
+	if err := repo.UpsertQBInstance(ctx, qi); err != nil {
+		t.Fatalf("UpsertQBInstance: %v", err)
+	}
+	qbMgr.Set(name, qb.NewInstance(srv.URL, "", "u", "p", qb.WithHTTPClient(srv.Client())))
+	return qi.ID, fq
+}
+
+func completedTorrent(hash string, seeders int, completionOn int64) *qb.TorrentInfo {
+	return &qb.TorrentInfo{
+		Hash:         hash,
+		Name:         "torrent",
+		State:        "uploading",
+		Progress:     1,
+		Completed:    100,
+		CompletionOn: completionOn,
+		Seeders:      seeders,
+		Ratio:        1.0,
+	}
+}
+
+func setDispatchMode(t *testing.T, repo *store.Repo, mode string) {
+	t.Helper()
+	st, err := repo.GetStrategy(ctx)
+	if err != nil {
+		t.Fatalf("GetStrategy: %v", err)
+	}
+	st.DispatchMode = mode
+	if err := repo.UpdateStrategy(ctx, st); err != nil {
+		t.Fatalf("UpdateStrategy: %v", err)
+	}
+}
+
+// --- poller tests ---
+
+func TestPollerDedupNoDoubleRelay(t *testing.T) {
+	repo := newTestRepo(t)
+	pl := &fakePipeline{}
+	eng := New(Config{Workers: 2}, repo, pl, qb.NewManager(), nil)
+
+	eng.SetFetchRSS(func(_ context.Context, _ string, _ *http.Client) ([]source.RssItem, error) {
+		size := int64(100)
+		return []source.RssItem{{GUID: testHash, Title: "Movie", Link: "http://x?id=1", Size: &size}}, nil
+	})
+
+	if err := repo.UpsertSource(ctx, &store.Source{Name: "src", Role: "source", RSSURL: "http://x/rss", Status: "active"}); err != nil {
+		t.Fatal(err)
+	}
+
+	eng.poll(ctx)
+
+	if n := rawCount(t, repo, `SELECT count(*) FROM seeds WHERE source_site='src' AND info_hash=?`, testHash); n != 1 {
+		t.Fatalf("seed count after first poll = %d, want 1", n)
+	}
+	if got := len(eng.jobs); got != 1 {
+		t.Fatalf("jobs after first poll = %d, want 1", got)
+	}
+
+	// Simulate the worker running the discovered seed through the pipeline.
+	eng.submitJob(ctx, <-eng.jobs, 0)
+	if pl.count() != 1 {
+		t.Fatalf("Relay called %d times, want 1", pl.count())
+	}
+
+	// Second poll: same hash must not re-create or re-relay.
+	eng.poll(ctx)
+	if n := rawCount(t, repo, `SELECT count(*) FROM seeds WHERE source_site='src' AND info_hash=?`, testHash); n != 1 {
+		t.Fatalf("seed count after second poll = %d, want 1", n)
+	}
+	if got := len(eng.jobs); got != 0 {
+		t.Fatalf("jobs after second poll = %d, want 0", got)
+	}
+	if pl.count() != 1 {
+		t.Fatalf("Relay called %d times after second poll, want 1", pl.count())
+	}
+}
+
+func TestPollerRetiredPermanentSkip(t *testing.T) {
+	repo := newTestRepo(t)
+	pl := &fakePipeline{}
+	eng := New(Config{Workers: 2}, repo, pl, qb.NewManager(), nil)
+
+	// A seed already retired for this hash.
+	sd := &store.Seed{SourceSite: "src", InfoHash: testHash, Title: "Old", Status: "retired"}
+	if _, err := repo.CreateSeed(ctx, sd); err != nil {
+		t.Fatal(err)
+	}
+
+	eng.SetFetchRSS(func(_ context.Context, _ string, _ *http.Client) ([]source.RssItem, error) {
+		return []source.RssItem{{GUID: testHash, Title: "Movie", Link: "http://x?id=1"}}, nil
+	})
+	if err := repo.UpsertSource(ctx, &store.Source{Name: "src", Role: "source", RSSURL: "http://x/rss", Status: "active"}); err != nil {
+		t.Fatal(err)
+	}
+
+	eng.poll(ctx)
+
+	if n := rawCount(t, repo, `SELECT count(*) FROM seeds WHERE source_site='src' AND info_hash=?`, testHash); n != 1 {
+		t.Fatalf("seed count = %d, want 1 (retired row persists, never re-created)", n)
+	}
+	if got := len(eng.jobs); got != 0 {
+		t.Fatalf("jobs = %d, want 0 (retired seed must be skipped)", got)
+	}
+	if pl.count() != 0 {
+		t.Fatalf("Relay called %d times, want 0", pl.count())
+	}
+}
+
+func TestPollerPauseOnConsecutiveFailures(t *testing.T) {
+	repo := newTestRepo(t)
+	pl := &fakePipeline{}
+	eng := New(Config{Workers: 1}, repo, pl, qb.NewManager(), nil)
+
+	clk := &fakeClock{t: time.Unix(1_700_000_000, 0)}
+	eng.SetClock(clk.Now)
+	eng.SetBackoff(func(int) time.Duration { return time.Second })
+	eng.SetFetchRSS(func(_ context.Context, _ string, _ *http.Client) ([]source.RssItem, error) {
+		return nil, errors.New("boom")
+	})
+
+	src := &store.Source{Name: "src", Role: "source", RSSURL: "http://x/rss", Status: "active"}
+	if err := repo.UpsertSource(ctx, src); err != nil {
+		t.Fatal(err)
+	}
+
+	eng.poll(ctx) // fail #1 → backs off 1s
+	if got, _ := repo.GetSourceByID(ctx, src.ID); got.Status != "active" || got.FailCount != 1 {
+		t.Fatalf("after fail#1: status=%s fail_count=%d, want active/1", got.Status, got.FailCount)
+	}
+
+	eng.poll(ctx) // within backoff → skipped
+	if got, _ := repo.GetSourceByID(ctx, src.ID); got.FailCount != 1 {
+		t.Fatalf("backoff should skip; fail_count=%d, want 1", got.FailCount)
+	}
+
+	clk.Advance(2 * time.Second)
+	eng.poll(ctx) // fail #2
+	clk.Advance(2 * time.Second)
+	eng.poll(ctx) // fail #3 → pause
+
+	got, err := repo.GetSourceByID(ctx, src.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != "paused" {
+		t.Fatalf("status = %q, want paused after 3 consecutive failures", got.Status)
+	}
+	if got.FailCount != 3 {
+		t.Fatalf("fail_count = %d, want 3", got.FailCount)
+	}
+}
+
+// --- monitor tests ---
+
+func seedAndRecord(t *testing.T, repo *store.Repo, status, recordStatus string) (seedID, targetID int64) {
+	t.Helper()
+	sd := &store.Seed{SourceSite: "src", InfoHash: testHash, Title: "T", Status: status}
+	if _, err := repo.CreateSeed(ctx, sd); err != nil {
+		t.Fatal(err)
+	}
+	tgt := &store.Target{Name: "t1", Type: "nexusphp", Version: "api", Status: "active"}
+	if err := repo.UpsertTarget(ctx, tgt); err != nil {
+		t.Fatal(err)
+	}
+	rec := &store.RelayRecord{SeedID: sd.ID, TargetID: tgt.ID, Role: "publisher", Status: recordStatus}
+	if err := repo.UpsertRecord(ctx, rec); err != nil {
+		t.Fatal(err)
+	}
+	return sd.ID, tgt.ID
+}
+
+func TestMonitorRetireAND(t *testing.T) {
+	repo := newTestRepo(t)
+	seedID, _ := seedAndRecord(t, repo, "seeding", "published")
+	qbMgr := qb.NewManager()
+	_, fq := registerFakeQB(t, repo, qbMgr, "qb", 1, []*qb.TorrentInfo{
+		completedTorrent(testHash, 15, time.Unix(1_700_000_000, 0).Add(-90*time.Minute).Unix()),
+	}, 0)
+
+	eng := New(Config{Workers: 1}, repo, &fakePipeline{}, qbMgr, nil)
+	eng.SetClock(func() time.Time { return time.Unix(1_700_000_000, 0) })
+
+	eng.monitor(ctx)
+
+	got, _ := repo.GetSeedByID(ctx, seedID)
+	if got.Status != "retired" {
+		t.Fatalf("seed status = %q, want retired (AND: seeders>=10 and time>60m)", got.Status)
+	}
+	rec, _ := repo.GetRecord(ctx, seedID, 1) // target id 1
+	if rec.Status != "retired" || rec.RetiredAt == 0 {
+		t.Fatalf("record = %+v, want retired with retired_at set", rec)
+	}
+	if fq.deleteCount() != 1 {
+		t.Fatalf("qb delete count = %d, want 1", fq.deleteCount())
+	}
+	if n := rawCount(t, repo, `SELECT count(*) FROM activity_log WHERE action='retired'`); n == 0 {
+		t.Fatal("expected a retired activity_log row")
+	}
+}
+
+func TestMonitorRetireANDNotSatisfied(t *testing.T) {
+	repo := newTestRepo(t)
+	seedID, _ := seedAndRecord(t, repo, "seeding", "published")
+	qbMgr := qb.NewManager()
+	_, fq := registerFakeQB(t, repo, qbMgr, "qb", 1, []*qb.TorrentInfo{
+		completedTorrent(testHash, 15, time.Unix(1_700_000_000, 0).Add(-10*time.Minute).Unix()),
+	}, 0)
+
+	eng := New(Config{Workers: 1}, repo, &fakePipeline{}, qbMgr, nil)
+	eng.SetClock(func() time.Time { return time.Unix(1_700_000_000, 0) })
+
+	eng.monitor(ctx)
+
+	got, _ := repo.GetSeedByID(ctx, seedID)
+	if got.Status != "seeding" {
+		t.Fatalf("seed status = %q, want seeding (AND not satisfied: time < 60m)", got.Status)
+	}
+	if fq.deleteCount() != 0 {
+		t.Fatalf("qb delete count = %d, want 0", fq.deleteCount())
+	}
+}
+
+func TestMonitorRetireOR(t *testing.T) {
+	repo := newTestRepo(t)
+	seedID, _ := seedAndRecord(t, repo, "seeding", "published")
+
+	// Switch retire mode to OR.
+	st, _ := repo.GetStrategy(ctx)
+	st.RetireMode = "or"
+	if err := repo.UpdateStrategy(ctx, st); err != nil {
+		t.Fatal(err)
+	}
+
+	qbMgr := qb.NewManager()
+	_, fq := registerFakeQB(t, repo, qbMgr, "qb", 1, []*qb.TorrentInfo{
+		completedTorrent(testHash, 5, time.Unix(1_700_000_000, 0).Add(-90*time.Minute).Unix()),
+	}, 0)
+
+	eng := New(Config{Workers: 1}, repo, &fakePipeline{}, qbMgr, nil)
+	eng.SetClock(func() time.Time { return time.Unix(1_700_000_000, 0) })
+
+	eng.monitor(ctx)
+
+	got, _ := repo.GetSeedByID(ctx, seedID)
+	if got.Status != "retired" {
+		t.Fatalf("seed status = %q, want retired (OR: time > 60m alone satisfies)", got.Status)
+	}
+	if fq.deleteCount() != 1 {
+		t.Fatalf("qb delete count = %d, want 1", fq.deleteCount())
+	}
+}
+
+func TestMonitorRetireORNotSatisfied(t *testing.T) {
+	repo := newTestRepo(t)
+	seedID, _ := seedAndRecord(t, repo, "seeding", "published")
+
+	st, _ := repo.GetStrategy(ctx)
+	st.RetireMode = "or"
+	if err := repo.UpdateStrategy(ctx, st); err != nil {
+		t.Fatal(err)
+	}
+
+	qbMgr := qb.NewManager()
+	_, fq := registerFakeQB(t, repo, qbMgr, "qb", 1, []*qb.TorrentInfo{
+		completedTorrent(testHash, 5, time.Unix(1_700_000_000, 0).Add(-10*time.Minute).Unix()),
+	}, 0)
+
+	eng := New(Config{Workers: 1}, repo, &fakePipeline{}, qbMgr, nil)
+	eng.SetClock(func() time.Time { return time.Unix(1_700_000_000, 0) })
+
+	eng.monitor(ctx)
+
+	got, _ := repo.GetSeedByID(ctx, seedID)
+	if got.Status != "seeding" {
+		t.Fatalf("seed status = %q, want seeding (OR not satisfied)", got.Status)
+	}
+	if fq.deleteCount() != 0 {
+		t.Fatalf("qb delete count = %d, want 0", fq.deleteCount())
+	}
+}
+
+func TestShouldRetireTable(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	cases := []struct {
+		name       string
+		seeders    int
+		minutesAgo int
+		ratio      float64
+		mode       string
+		ratioOn    bool
+		ratioMin   float64
+		want       bool
+	}{
+		{"and-both", 15, 90, 1.0, "and", false, 0, true},
+		{"and-seeders-only", 15, 10, 1.0, "and", false, 0, false},
+		{"and-time-only", 5, 90, 1.0, "and", false, 0, false},
+		{"or-time", 5, 90, 1.0, "or", false, 0, true},
+		{"or-seeders", 15, 10, 1.0, "or", false, 0, true},
+		{"or-neither", 5, 10, 1.0, "or", false, 0, false},
+		{"and-ratio-ok", 15, 90, 3.0, "and", true, 2.0, true},
+		{"and-ratio-fail", 15, 90, 1.0, "and", true, 2.0, false},
+		{"or-ratio-only", 5, 10, 3.0, "or", true, 2.0, true},
+		{"or-ratio-fail", 5, 10, 0.5, "or", true, 2.0, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			tt := &qb.TorrentInfo{
+				Seeders:      c.seeders,
+				Ratio:        c.ratio,
+				CompletionOn: now.Add(-time.Duration(c.minutesAgo) * time.Minute).Unix(),
+			}
+			st := defaultStrategy()
+			st.RetireMode = c.mode
+			if c.ratioOn {
+				st.RetireRatioEnabled = 1
+				st.RetireRatio = c.ratioMin
+			}
+			got, _ := shouldRetire(tt, st, now)
+			if got != c.want {
+				t.Fatalf("shouldRetire = %v, want %v", got, c.want)
+			}
+		})
+	}
+}
+
+// --- dispatcher tests ---
+
+func TestDispatcherPriority(t *testing.T) {
+	repo := newTestRepo(t)
+	qbMgr := qb.NewManager()
+	registerFakeQB(t, repo, qbMgr, "low", 1, nil, 0)
+	registerFakeQB(t, repo, qbMgr, "high", 5, nil, 0)
+	registerFakeQB(t, repo, qbMgr, "mid", 3, nil, 0)
+
+	d := NewDispatcher(repo, qbMgr)
+	got, err := d.SelectQB(ctx, DispatchOpts{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "high" {
+		t.Fatalf("priority SelectQB = %q, want high", got)
+	}
+}
+
+func TestDispatcherMostFreeDisk(t *testing.T) {
+	repo := newTestRepo(t)
+	qbMgr := qb.NewManager()
+	registerFakeQB(t, repo, qbMgr, "a", 1, nil, 100)
+	registerFakeQB(t, repo, qbMgr, "b", 1, nil, 900)
+	registerFakeQB(t, repo, qbMgr, "c", 1, nil, 500)
+	setDispatchMode(t, repo, "most_free_disk")
+
+	d := NewDispatcher(repo, qbMgr)
+	got, err := d.SelectQB(ctx, DispatchOpts{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "b" {
+		t.Fatalf("most_free_disk SelectQB = %q, want b (900 free)", got)
+	}
+}
+
+func TestDispatcherLeastJobs(t *testing.T) {
+	repo := newTestRepo(t)
+	qbMgr := qb.NewManager()
+	mk := func(n int) []*qb.TorrentInfo {
+		out := make([]*qb.TorrentInfo, n)
+		for i := range out {
+			out[i] = &qb.TorrentInfo{Hash: fmt.Sprintf("%040d", i)}
+		}
+		return out
+	}
+	registerFakeQB(t, repo, qbMgr, "a", 1, mk(5), 0)
+	registerFakeQB(t, repo, qbMgr, "b", 1, mk(1), 0)
+	registerFakeQB(t, repo, qbMgr, "c", 1, mk(3), 0)
+	setDispatchMode(t, repo, "least_jobs")
+
+	d := NewDispatcher(repo, qbMgr)
+	got, err := d.SelectQB(ctx, DispatchOpts{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "b" {
+		t.Fatalf("least_jobs SelectQB = %q, want b (1 job)", got)
+	}
+}
+
+func TestDispatcherRoundRobin(t *testing.T) {
+	repo := newTestRepo(t)
+	qbMgr := qb.NewManager()
+	registerFakeQB(t, repo, qbMgr, "alpha", 10, nil, 0)
+	registerFakeQB(t, repo, qbMgr, "beta", 20, nil, 0)
+	setDispatchMode(t, repo, "round_robin")
+
+	d := NewDispatcher(repo, qbMgr)
+	var seq []string
+	for i := 0; i < 4; i++ {
+		name, err := d.SelectQB(ctx, DispatchOpts{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		seq = append(seq, name)
+	}
+	want := []string{"beta", "alpha", "beta", "alpha"} // priority order: beta(20) then alpha(10)
+	if strings.Join(seq, ",") != strings.Join(want, ",") {
+		t.Fatalf("round_robin sequence = %v, want %v", seq, want)
+	}
+}
+
+func TestDispatcherCrossSeedPreferOrigin(t *testing.T) {
+	repo := newTestRepo(t)
+	qbMgr := qb.NewManager()
+	registerFakeQB(t, repo, qbMgr, "origin", 1, nil, 0)
+	registerFakeQB(t, repo, qbMgr, "other", 9, nil, 0)
+
+	d := NewDispatcher(repo, qbMgr)
+	got, err := d.SelectQB(ctx, DispatchOpts{PreferName: "origin"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "origin" {
+		t.Fatalf("cross-seed SelectQB = %q, want origin (prefer origin's qB)", got)
+	}
+}
+
+// --- retry tests ---
+
+func TestRetryBackoffSequenceAndFailOut(t *testing.T) {
+	repo := newTestRepo(t)
+	pl := &fakePipeline{err: errors.New("relay failed")}
+	eng := New(Config{Workers: 1}, repo, pl, qb.NewManager(), nil)
+
+	clk := &fakeClock{t: time.Unix(1_700_000_000, 0)}
+	eng.SetClock(clk.Now)
+
+	sd := &store.Seed{SourceSite: "src", InfoHash: testHash, Title: "T", Status: "discovered"}
+	if _, err := repo.CreateSeed(ctx, sd); err != nil {
+		t.Fatal(err)
+	}
+
+	// Initial attempt fails → schedule retry #1 (60s).
+	eng.submitJob(ctx, sd.ID, 0)
+	if got := len(eng.retry.Due()); got != 0 {
+		t.Fatalf("due immediately after submit = %d, want 0 (backoff not elapsed)", got)
+	}
+	gotSeed, _ := repo.GetSeedByID(ctx, sd.ID)
+	if gotSeed.Status != "retry" || gotSeed.RetryCount != 1 {
+		t.Fatalf("after initial failure: status=%q retry_count=%d, want retry/1", gotSeed.Status, gotSeed.RetryCount)
+	}
+
+	clk.Advance(60 * time.Second)
+	due := eng.retry.Due()
+	if len(due) != 1 || due[0].retryNo != 1 {
+		t.Fatalf("due after +60s = %+v, want one retryNo=1", due)
+	}
+
+	// Retry #1 fails → retry #2 (300s).
+	eng.submitJob(ctx, sd.ID, 1)
+	clk.Advance(300 * time.Second)
+	due = eng.retry.Due()
+	if len(due) != 1 || due[0].retryNo != 2 {
+		t.Fatalf("due after +300s = %+v, want one retryNo=2", due)
+	}
+
+	// Retry #2 fails → retry #3 (900s).
+	eng.submitJob(ctx, sd.ID, 2)
+	clk.Advance(900 * time.Second)
+	due = eng.retry.Due()
+	if len(due) != 1 || due[0].retryNo != 3 {
+		t.Fatalf("due after +900s = %+v, want one retryNo=3", due)
+	}
+
+	// Retry #3 fails → exceeded → failed, no further enqueue.
+	eng.submitJob(ctx, sd.ID, 3)
+	gotSeed, _ = repo.GetSeedByID(ctx, sd.ID)
+	if gotSeed.Status != "failed" {
+		t.Fatalf("status after exceed = %q, want failed", gotSeed.Status)
+	}
+	if gotSeed.RetryCount != 4 {
+		t.Fatalf("retry_count after exceed = %d, want 4", gotSeed.RetryCount)
+	}
+	if got := len(eng.retry.Due()); got != 0 {
+		t.Fatalf("due items after exceed = %d, want 0", got)
+	}
+	if pl.count() != 4 {
+		t.Fatalf("Relay called %d times, want 4 (initial + 3 retries)", pl.count())
+	}
+}
+
+func TestRebuildRetryQueueFromDB(t *testing.T) {
+	repo := newTestRepo(t)
+	pl := &fakePipeline{err: errors.New("relay failed")}
+	eng := New(Config{Workers: 1}, repo, pl, qb.NewManager(), nil)
+
+	clk := &fakeClock{t: time.Unix(1_700_000_000, 0)}
+	eng.SetClock(clk.Now)
+
+	sd := &store.Seed{SourceSite: "src", InfoHash: testHash, Title: "T", Status: "retry", RetryCount: 2}
+	if _, err := repo.CreateSeed(ctx, sd); err != nil {
+		t.Fatal(err)
+	}
+
+	eng.rebuildRetryQueue(ctx)
+
+	if got := len(eng.retry.Due()); got != 0 {
+		t.Fatalf("due immediately after rebuild = %d, want 0", got)
+	}
+	clk.Advance(300 * time.Second) // retryNo=2 → 300s backoff
+	due := eng.retry.Due()
+	if len(due) != 1 || due[0].seedID != sd.ID || due[0].retryNo != 2 {
+		t.Fatalf("due after rebuild+300s = %+v, want seedID=%d retryNo=2", due, sd.ID)
+	}
+}
+
+func TestEngineStartStop(t *testing.T) {
+	repo := newTestRepo(t)
+	pl := &fakePipeline{}
+	eng := New(Config{Workers: 2, PollInterval: time.Hour, MonitorInterval: time.Hour}, repo, pl, qb.NewManager(), nil)
+	eng.SetFetchRSS(func(_ context.Context, _ string, _ *http.Client) ([]source.RssItem, error) {
+		return nil, nil
+	})
+
+	if err := eng.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if !eng.Running() {
+		t.Fatal("engine not running after Start")
+	}
+	if err := eng.Start(ctx); err == nil {
+		t.Fatal("second Start should return an error")
+	}
+	if err := eng.Stop(ctx); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if eng.Running() {
+		t.Fatal("engine still running after Stop")
+	}
+}

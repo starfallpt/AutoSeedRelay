@@ -19,8 +19,8 @@ func TestOpenMigrateIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("MigrateVersion: %v", err)
 	}
-	if ver != 1 {
-		t.Fatalf("expected schema version 1, got %d", ver)
+	if ver != 2 {
+		t.Fatalf("expected schema version 2, got %d", ver)
 	}
 
 	if err := s.Close(); err != nil {
@@ -36,8 +36,8 @@ func TestOpenMigrateIdempotent(t *testing.T) {
 
 	if ver, err := s2.MigrateVersion(); err != nil {
 		t.Fatalf("MigrateVersion after reopen: %v", err)
-	} else if ver != 1 {
-		t.Fatalf("expected schema version 1 after reopen, got %d", ver)
+	} else if ver != 2 {
+		t.Fatalf("expected schema version 2 after reopen, got %d", ver)
 	}
 
 	tables := []string{
@@ -53,6 +53,14 @@ func TestOpenMigrateIdempotent(t *testing.T) {
 		if err != nil {
 			t.Fatalf("table %q missing: %v", table, err)
 		}
+	}
+
+	// targets must carry the tags_map column added by migration 00002.
+	var col string
+	if err := s2.db.QueryRow(
+		"SELECT name FROM pragma_table_info('targets') WHERE name='tags_map'",
+	).Scan(&col); err != nil {
+		t.Fatalf("targets.tags_map column missing: %v", err)
 	}
 
 	// activity_log must carry the created_at index (§6).
