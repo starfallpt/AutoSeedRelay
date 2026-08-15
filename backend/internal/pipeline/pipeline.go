@@ -49,6 +49,7 @@ type Repo interface {
 	ListRecordsBySeed(ctx context.Context, seedID int64) ([]*store.RelayRecord, error)
 	UpsertRecord(ctx context.Context, rec *store.RelayRecord) (inserted bool, err error)
 	SetRecordRole(ctx context.Context, seedID, targetID int64, role string) error
+	MarkPublished(ctx context.Context, seedID, targetID int64, publishedAt int64) error
 	UpdateRecordStatus(ctx context.Context, seedID, targetID int64, status, errMsg string) error
 	UpdateRecordAttempt(ctx context.Context, seedID, targetID int64, status, errMsg string) error
 	ListReplicas(ctx context.Context, seedID int64) ([]*store.Replica, error)
@@ -108,10 +109,10 @@ type Deps struct {
 // use "published" / "cross_seeding" / "failed". All values follow the
 // BIZ-SPEC §5 state machine.
 const (
-	statusRelayed     = "seeding"
-	statusPending     = "pending"
-	statusPublished   = "published"
-	statusCrossSeeded = "cross_seeding"
+	statusSeeding      = "seeding"
+	statusPending      = "pending"
+	statusPublished    = "published"
+	statusCrossSeeding = "cross_seeding"
 	statusFailed      = "failed"
 	statusRetired     = "retired"
 	statusSkipped     = "skipped"
@@ -125,10 +126,10 @@ const (
 // finished (published / cross-seeding / seeding / retired) and must be skipped
 // on retry (target-level idempotency).
 var doneRecordStatuses = map[string]bool{
-	statusPublished:   true,
-	statusCrossSeeded: true,
-	statusRelayed:     true, // "seeding" at the record level
-	statusRetired:     true,
+	statusPublished:    true,
+	statusCrossSeeding: true,
+	statusSeeding:      true, // "seeding" at the record level
+	statusRetired:      true,
 }
 
 // TargetFailure records one target that failed during a relay attempt.
@@ -304,7 +305,7 @@ func (p *RelayOne) Relay(ctx context.Context, seedID int64) error {
 	// is not already finished (published / cross_seeding / seeding / retired).
 	pending := p.pendingTargets(ctx, seed.ID, targets)
 	if len(pending) == 0 {
-		_ = p.repo.UpdateSeedStatus(ctx, seed.ID, statusRelayed, "")
+		_ = p.repo.UpdateSeedStatus(ctx, seed.ID, statusSeeding, "")
 		return nil
 	}
 
@@ -317,7 +318,7 @@ func (p *RelayOne) Relay(ctx context.Context, seedID int64) error {
 		}
 	}
 	if len(failed) == 0 {
-		_ = p.repo.UpdateSeedStatus(ctx, seed.ID, statusRelayed, "")
+		_ = p.repo.UpdateSeedStatus(ctx, seed.ID, statusSeeding, "")
 		return nil
 	}
 	if len(failed) < len(results) {

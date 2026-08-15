@@ -288,6 +288,51 @@ func TestPollerRetiredPermanentSkip(t *testing.T) {
 	}
 }
 
+func TestPollerTombstoneSurvivesSeedDeletion(t *testing.T) {
+	repo := newTestRepo(t)
+	pl := &fakePipeline{}
+	eng := New(Config{Workers: 2}, repo, pl, qb.NewManager(), nil)
+
+	eng.SetFetchRSS(func(_ context.Context, _ string, _ *http.Client) ([]source.RssItem, error) {
+		return []source.RssItem{{GUID: testHash, Title: "Movie", Link: "http://x?id=1"}}, nil
+	})
+	if err := repo.UpsertSource(ctx, &store.Source{Name: "src", Role: "source", RSSURL: "http://x/rss", Status: "active"}); err != nil {
+		t.Fatal(err)
+	}
+
+	// First poll: the hash is discovered and a seed row is created.
+	eng.poll(ctx)
+	if n := rawCount(t, repo, `SELECT count(*) FROM seeds WHERE source_site='src' AND info_hash=?`, testHash); n != 1 {
+		t.Fatalf("seed count after first poll = %d, want 1", n)
+	}
+	if got := len(eng.jobs); got != 1 {
+		t.Fatalf("jobs after first poll = %d, want 1", got)
+	}
+	<-eng.jobs // drain the discovered job so later assertions see a clean channel
+
+	// The poller must also have tombstoned the hash.
+	if n := rawCount(t, repo, `SELECT count(*) FROM seen_hashes WHERE source_site='src' AND info_hash=?`, testHash); n != 1 {
+		t.Fatalf("seen_hashes rows after first poll = %d, want 1", n)
+	}
+
+	// Simulate user cleanup: delete the seed row. The tombstone must persist.
+	if _, err := repo.DB().ExecContext(ctx, `DELETE FROM seeds WHERE source_site='src' AND info_hash=?`, testHash); err != nil {
+		t.Fatal(err)
+	}
+
+	// Replay the same RSS: the tombstone must prevent re-creating the seed.
+	eng.poll(ctx)
+	if n := rawCount(t, repo, `SELECT count(*) FROM seeds WHERE source_site='src' AND info_hash=?`, testHash); n != 0 {
+		t.Fatalf("seed count after delete + replay = %d, want 0 (tombstone prevents re-creation)", n)
+	}
+	if got := len(eng.jobs); got != 0 {
+		t.Fatalf("jobs after delete + replay = %d, want 0", got)
+	}
+	if pl.count() != 0 {
+		t.Fatalf("Relay called %d times, want 0", pl.count())
+	}
+}
+
 func TestPollerPauseOnConsecutiveFailures(t *testing.T) {
 	repo := newTestRepo(t)
 	pl := &fakePipeline{}

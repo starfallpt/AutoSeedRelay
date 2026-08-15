@@ -19,8 +19,8 @@ func TestOpenMigrateIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("MigrateVersion: %v", err)
 	}
-	if ver != 5 {
-		t.Fatalf("expected schema version 5, got %d", ver)
+	if ver != 6 {
+		t.Fatalf("expected schema version 6, got %d", ver)
 	}
 
 	if err := s.Close(); err != nil {
@@ -36,14 +36,14 @@ func TestOpenMigrateIdempotent(t *testing.T) {
 
 	if ver, err := s2.MigrateVersion(); err != nil {
 		t.Fatalf("MigrateVersion after reopen: %v", err)
-	} else if ver != 5 {
-		t.Fatalf("expected schema version 5 after reopen, got %d", ver)
+	} else if ver != 6 {
+		t.Fatalf("expected schema version 6 after reopen, got %d", ver)
 	}
 
 	tables := []string{
 		"sources", "targets", "qb_instances", "seeds", "relay_records",
 		"seed_replicas", "activity_log", "notifier_instances",
-		"notifier_routes", "strategies",
+		"notifier_routes", "strategies", "seen_hashes",
 	}
 	for _, table := range tables {
 		var name string
@@ -86,6 +86,15 @@ func TestOpenMigrateIdempotent(t *testing.T) {
 			"SELECT name FROM pragma_table_info('strategies') WHERE name=?", col,
 		).Scan(&col); err != nil {
 			t.Fatalf("strategies.%s column missing: %v", col, err)
+		}
+	}
+
+	// seen_hashes must carry the tombstone columns added by migration 00006.
+	for _, col := range []string{"source_site", "info_hash", "first_seen_at"} {
+		if err := s2.db.QueryRow(
+			"SELECT name FROM pragma_table_info('seen_hashes') WHERE name=?", col,
+		).Scan(&col); err != nil {
+			t.Fatalf("seen_hashes.%s column missing: %v", col, err)
 		}
 	}
 }

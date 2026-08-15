@@ -2,6 +2,7 @@
 
 > 2025 与用户逐项对齐确认。本文是业务语义的**唯一权威来源**，代码重构以此为准。
 > 现状代码与本文冲突处以本文为准；未覆盖细节见各 docs 参考文档。
+> 实现修订（M3）：实现与本文存在差异且实现合理处，已就地修正并标「实现修订」注记，汇总见 §11。
 
 ## 1. 业务目标
 
@@ -31,7 +32,7 @@
 
 1. **轮询**：每 poll_interval 秒拉源站 RSS（启动立即一轮）。
 2. **筛选**：促销白名单 + 关键词 + 大小范围，三者 AND；全空=全收；缺失字段不参与对应条件（空值语义对称化）。
-3. **去重**：按 `(source_site, info_hash)` 复合键；已处理且未手动重发 → 跳过。
+3. **去重**：按 `(source_site, info_hash)` 复合键；Poller 首见即写 `seen_hashes` 永久 tombstone（实现修订：即使 seeds 行被删除或旧备份恢复，也不会重新入队，见 §11）。
 4. **下载**：RSS 直下或指定 qB 直拉（按分派策略选 qB，见 §7）。
 5. **补详情**：详情页/API 抓文件列表、标签、MediaInfo、IMDb。
 6. **清洗适配**：改 tracker/private/source；标题规范化（titler 结构化解析填维度/分类，标题保留源站规范后版本，修正 Python 怪癖）；简介清洗重组；标签按目标站映射。
@@ -39,7 +40,7 @@
 8. **监控**：遍历所有启用 qB：在线状态/做种统计/磁盘/低速率/撤种判定。
 9. **撤种**：条件满足 → 停种删除 → 标 retired 记录原因；**撤后永久去重，面板可手动重发**。
 
-**重试**：下载/上传失败自动重试 3 次（指数退避），仍失败进失败队列；面板可手动重试；cookie 过期识别并告警。
+**重试**：失败自动重试（次数 = strategy.retry_max 默认 3，指数退避 60s/300s/900s），仍失败进失败队列（status=failed）+ critical 告警。**目标级重试（实现修订）**：部分目标成功、部分失败（PartialFailure）时仅重跑未完成目标；重试耗尽后保留成功目标（seed 保持 seeding）、仅对失败目标 critical 告警。面板可手动重发（`POST /seeds/{id}/resend`，`full=true` 全量重跑）；cookie 过期识别并告警。
 
 ## 4. 实体模型
 
@@ -53,16 +54,20 @@
 
 ## 5. 状态机（统一一套，两级）
 
-**种子级（seed.status）**：
-`pending → downloading → downloaded → processing → seeding → retired | failed | skipped`
-- downloading→downloaded：下载完成（状态时序正确，先下载后标 downloaded）
-- processing：清洗适配中（可跳过直接发布）
-- seeding：至少一个目标站已发布/辅种且 qB 做种中
-- retired：撤种；failed：重试耗尽或不可重试错误；skipped：人工跳过
+**种子级（seed.status，9 态）**：
+`discovered → downloading → downloaded → processing → seeding → retired | failed | skipped`
+- discovered：初始态（Poller 入库，尚未处理）——**实现修订**：原「pending」改名为「discovered」
+- downloading→downloaded：下载完成（先下载后标 downloaded）
+- processing：清洗适配中（Relay 开始即置，含详情抓取阶段）
+- seeding：至少一个目标站已发布/辅种
+- retired：撤种；failed：重试耗尽或不可重试错误；skipped：人工跳过/筛选跳过
+- retry：**内部态**（重试队列等待中，失败后引擎置位，重启后从该态重建队列）——**实现修订**：新增
 
-**记录级（relay_record.status，每目标站一条）**：
-`pending → uploading → published | cross_seeding → seeding → retired | failed | skipped_existing`
-- uploaded 后回挂 qB；cross_seeding：撞车降级辅种后做种
+**记录级（relay_record.status，每目标站一条，8 态白名单）**：
+实际流转 `pending → published | cross_seeding | failed → retired`
+- pending：记录创建/未处理；published：发布成功；cross_seeding：撞车降级辅种
+- failed：该目标失败（目标级重试时仅重跑此类）；retired：撤种
+- **实现修订**：白名单含 `uploading`、`skipped_existing`，但当前 pipeline 直接 pending→published/cross_seeding（未单独写 uploading），撞车走 cross_seeding（不再用 skipped_existing）；白名单 8 态为 pending/uploading/published/cross_seeding/seeding/failed/retired/skipped_existing
 
 ## 6. 业务规则定稿
 
@@ -85,7 +90,7 @@
 - 条件：做种人数 ≥ 10；做种时长 > 60 分钟；分享率 **默认关闭**
 - 组合模式：**可配置** AND（全部满足）/ OR（任一满足）
 - 动作：停种 → 删除（delete_files 可配）→ retired + 原因入库
-- 磁盘紧急/低速率：独立于撤种策略的紧急中止路径
+- 磁盘紧急/低速率：独立于撤种策略的紧急中止路径（**实现修订**：阈值入 strategy 单行——`disk_low_gb`=50 / `disk_critical_gb`=20 告警，`low_speed_kbps`=100 持续 `low_speed_duration_sec`=600 触发 `low_speed_action`=abort 中止，见 §11）
 
 **图片转存（可选功能）**：可配置图床 URL + token；开关「封面转存」；默认关。
 
@@ -102,7 +107,7 @@
 - **Provider 类型**（内置）：webhook（企业微信/钉钉/飞书/自建）、telegram、smtp 邮件、ntfy/gotify、serverchan/pushplus（预留）。
 - **实例 Instance**：同一 provider 可配**多份**（如两个 TG bot）；每份独立凭据、独立开关。
 - **事件分层 Tier**：critical（发布失败重试耗尽、qB 全断、磁盘 critical、cookie 过期）；warning（磁盘 low、单台 qB 断连）；info（发布成功、降级辅种、自动撤种、每日汇总）。
-- **路由矩阵**：实例 × Tier 勾选；一层可绑多个实例；**同实例同事件 10 分钟聚合**防刷屏（critical 不聚合）。
+- **路由矩阵**：实例 × Tier 勾选；一层可绑多个实例；**同实例 × tier × 事件 10 分钟聚合**防刷屏（critical 不聚合；聚合键含事件标签，语义不同的事件分开合并）。
 - 全部默认关，不配置零负担。
 
 ## 9. 仪表盘（提案，见对话）
@@ -111,9 +116,24 @@
 
 ## 10. 技术栈与范围
 
-- 后端：Go + **Gin**；存储 **sqlc** + SQLite（默认）/ PostgreSQL（可选，DSN 切换）；迁移 goose/atlas。
+- 后端：Go + **Gin**；存储 **SQLite**（modernc 纯 Go，手写 SQL 仓储 + 嵌入式迁移）；PostgreSQL/sqlc/goose 为原始预留未落地（实现修订见 ARCHITECTURE-v4 §17）。
 - 前端：Vue 3 + Vite + TS + Element Plus + Pinia，独立工程。
 - 保留：三套目标站适配器、qB 客户端逻辑、bencode（加固）、descr 清洗、titler（修正）。
 - 砍掉：CLI 6 个子命令（只留 serve）；旧 config.go 死代码路径；relay_jobs 旧表；python_compare 怪癖固化测试。
 - 修复清单：见《项目分析报告》P0/P1 全部 + 业务缺陷 23 条（docs/BIZ-SPEC 附录来源）。
 - **备份导出（Web）**：一键下载 zip（数据库 + 业务配置 + 部署配置脱敏版）；导入恢复功能随后。
+
+## 11. 实现修订注记（M3）
+
+实现与本文存在差异且实现合理处，就地修正并汇总于此：
+
+| 主题 | 本文原文 | 实现修订 |
+|---|---|---|
+| 种子初始态 | pending | discovered（内部态） |
+| 种子内部态 | — | retry（重试队列等待中，重启可重建） |
+| 记录级流转 | pending → uploading → published…skipped_existing | 实际 pending → published/cross_seeding/failed → retired；uploading/skipped_existing 保留白名单但当前不写 |
+| 重试语义 | 全种子级重试 | PartialFailure 目标级重试（仅重跑未完成目标，耗尽保留成功目标） |
+| 去重 | 仅 (source_site, info_hash) 复合键 | 新增 seen_hashes 永久 tombstone（删除/旧备份也不重入队） |
+| 通知聚合 | 同实例同事件 | 同实例 × tier × 事件（语义不同事件分开合并） |
+| 磁盘/低速率 | 描述性 | 阈值入 strategy 单行：disk_low_gb=50 / disk_critical_gb=20 / low_speed_kbps=100 / low_speed_duration_sec=600 / low_speed_action=abort |
+| 手动重发 | 面板可手动重试 | `POST /seeds/{id}/resend`（full=true 全量重跑，删除全部记录+副本） |

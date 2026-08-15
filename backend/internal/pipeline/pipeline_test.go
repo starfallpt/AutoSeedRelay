@@ -351,8 +351,8 @@ func TestRelayAllTargetsSuccess(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Status != statusRelayed {
-		t.Fatalf("seed status = %q, want %q", got.Status, statusRelayed)
+	if got.Status != statusSeeding {
+		t.Fatalf("seed status = %q, want %q", got.Status, statusSeeding)
 	}
 
 	targets, _ := repo.GetEnabledTargets(context.Background())
@@ -408,15 +408,15 @@ func TestRelayCrossSeed(t *testing.T) {
 	}
 
 	got, _ := repo.GetSeedByID(context.Background(), seed.ID)
-	if got.Status != statusRelayed {
-		t.Fatalf("seed status = %q, want %q", got.Status, statusRelayed)
+	if got.Status != statusSeeding {
+		t.Fatalf("seed status = %q, want %q", got.Status, statusSeeding)
 	}
 
 	rec, err := repo.GetRecord(context.Background(), seed.ID, tgt.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if rec.Status != statusCrossSeeded || rec.Role != roleSeeder {
+	if rec.Status != statusCrossSeeding || rec.Role != roleSeeder {
 		t.Fatalf("record = %+v, want cross_seeding/seeder", rec)
 	}
 
@@ -471,7 +471,7 @@ func TestRelayCrossSeedTimeoutFallsBack(t *testing.T) {
 	}
 
 	rec, _ := repo.GetRecord(context.Background(), seed.ID, tgt.ID)
-	if rec.Status != statusCrossSeeded {
+	if rec.Status != statusCrossSeeding {
 		t.Fatalf("record status = %q, want cross_seeding", rec.Status)
 	}
 
@@ -568,7 +568,7 @@ func TestRelayOneTargetFailsOtherSucceeds(t *testing.T) {
 	// The engine's retry owns the terminal transition; a partial failure must
 	// not yet mark the seed seeding.
 	got, _ := repo.GetSeedByID(context.Background(), seed.ID)
-	if got.Status == statusRelayed {
+	if got.Status == statusSeeding {
 		t.Fatalf("seed status = %q, want NOT seeding yet (partial failure pending retry)", got.Status)
 	}
 

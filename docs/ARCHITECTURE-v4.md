@@ -1,7 +1,7 @@
 # AutoSeedRelay 重构架构方案 v4
 
-> 状态：已与用户逐项确认（业务定稿见 docs/BIZ-SPEC.md）。本文件是重构实施的架构依据。
-> 配套：docs/BIZ-SPEC.md（业务语义权威）、docs/ARCHITECTURE-v3.md（旧版，仅历史参考）。
+> 状态：M0~M3 已实现，M4（生产验证）/M5（收尾）进行中。本文已按 M3 实现同步（偏差见 §17 实现修订）。
+> 配套：docs/BIZ-SPEC.md（业务语义权威）、docs/archive/ARCHITECTURE-v3.md（旧版，仅历史参考）。
 
 ## 1. 目标与原则
 
@@ -12,8 +12,8 @@
 
 | 层 | 选型 |
 |---|---|
-| 后端 | Go 1.22+ · Gin · sqlc · goose 迁移 · yaml.v3（部署级配置） |
-| 存储 | SQLite 默认（modernc 纯 Go）/ PostgreSQL 可选（DSN 切换，sqlc 双方言） |
+| 后端 | Go 1.22+ · Gin · 手写 SQL 仓储 · 自研嵌入迁移器 · yaml.v3（部署级配置） |
+| 存储 | SQLite（modernc 纯 Go）；PostgreSQL 可选/sqlc 为原始预留，M3 未落地（见 §17） |
 | 前端 | Vue 3 · Vite · TypeScript · Element Plus · Pinia · axios |
 | 打包 | 多阶段 Docker：node 编前端 → Go embed 产物 → alpine 单容器 |
 | 测试 | 单测 SQLite / 集成 PG 容器 / race / gosec / trivy |
@@ -25,10 +25,10 @@ AutoSeedRelay/
 ├─ backend/
 │  ├─ cmd/relay/main.go        # 唯一入口 serve
 │  ├─ internal/
-│  │  ├─ config/               # 部署级配置（viper）：端口/DSN/日志/目录
+│  │  ├─ config/               # 部署级配置（yaml.v3 + env）：listen_addr/log_level/db_path
 │  │  ├─ secret/               # 主密钥 + AES-256-GCM 加解密 + 脱敏
-│  │  ├─ store/                # sqlc 生成 + 仓储接口（SQLite/PG 双引擎）
-│  │  ├─ qb/                   # qB 客户端 + 多实例连接池 + 免鉴权反代支持
+│  │  ├─ store/                # 手写 SQL 仓储 + 嵌入式迁移（migrations/*.sql）
+│  │  ├─ qb/                   # qB 客户端 + 多实例连接池
 │  │  ├─ source/               # RSS/详情/下载（移植+加固：大小上限/SSRF防护/退避）
 │  │  ├─ adapters/             # 目标站适配（nexusphp/classic/mteam）+ 站点枚举探测
 │  │  ├─ bencode/              # 移植+加固（溢出/深度/大小限制）
@@ -38,10 +38,8 @@ AutoSeedRelay/
 │  │  ├─ notifier/             # 通知：provider→实例→分层路由→聚合
 │  │  ├─ backup/               # zip 导出/导入恢复
 │  │  ├─ server/               # Gin 装配、路由、依赖注入
-│  │  ├─ api/                  # handlers：auth/setup/seeds/qb/config/notify/preview/backup/logs/dashboard
-│  │  └─ webfs/                # embed 前端构建产物 + /qb/* 反向代理
-│  ├─ migrations/              # goose：sqlite/ 与 postgres/ 双方言目录
-│  └─ queries/                 # sqlc .sql 源（共享语义，方言同目录）
+│  │  ├─ api/                  # handlers：config(sources/targets/qb/strategy/notifiers) + ops(seeds/events/dashboard/backup)
+│  │  └─ webfs/                # embed 前端构建产物
 ├─ frontend/                   # Vue3 工程（views/components/stores/api）
 ├─ archive/                    # 旧代码归档（移植参考，不进构建）
 ├─ deploy/                     # Dockerfile/compose/start（重写，零硬编码凭据）
@@ -68,7 +66,7 @@ sources(id, name, role, base_url, rss_url, announce_url, status[active|paused],
         fail_count, enc_cookie, enc_passkey, enc_api_token, created_at, updated_at)
 targets(id, name, type[nexusphp|nexusphp_classic|mteam], version[api|classic],
         base_url, announce_url, test_mode, fallback_category,
-        category_overrides JSON, dimension_overrides JSON, enc_* 凭据, status)
+        category_overrides JSON, dimension_overrides JSON, tags_map JSON, enc_* 凭据, status)
 qb_instances(id, name, host, port, username, enc_password, priority, enabled,
              last_seen_at, extra JSON)
 seeds(id, source_site, info_hash, title, size, category, promotion, source_id,
@@ -87,16 +85,23 @@ notifier_routes(instance_id, tier[critical|warning|info], enabled)
 strategies(id=1 单行: promotions/keywords/min_size/max_size,
            retire_seeders/retire_minutes/retire_ratio_enabled/retire_ratio/
            retire_mode[and|or], dispatch_mode, timezone, image_host JSON,
-           image_cover_enabled, retry_max)
+           image_cover_enabled, retry_max,
+           disk_low_gb/disk_critical_gb/low_speed_kbps/
+           low_speed_duration_sec/low_speed_action)      # M3 磁盘/低速率监控
+app_settings(key PRIMARY KEY, value)                     # 应用级 KV（M3：web_password_hash/session_secret）
+seen_hashes(source_site, info_hash, first_seen_at,
+            PRIMARY KEY(source_site, info_hash))          # 永久去重 tombstone（M5）
 ```
+
+> 迁移：`backend/internal/store/migrations/00001_init.sql` ~ `00006_seen_hashes.sql`（6 个，自研嵌入迁移器按 PRAGMA user_version 递增应用；00003 仅推进版本号、无 DDL）。
 
 ## 7. 引擎设计
 
 - **Poller**：每源站独立 ticker（poll_interval，启动立即一轮）；RSS→筛选→去重→入队。
 - **Dispatcher**：多 qB 分派接口 `PickQB(kind)`；策略 priority（手动优先级降序）/ least_jobs / most_free_disk / round_robin；交叉辅种优先同 qB。
-- **RetryQueue**：内存延时队列（退避 60s/300s/900s，上限 retry_max=3）；启动时从 failed 且未达上限的记录重建；失败进 failed + critical 通知（重试耗尽）。
+- **RetryQueue**：内存延时队列（退避 60s/300s/900s，上限 retry_max=3）；启动时从 status='retry' 的记录重建；失败进 failed + critical 通知（重试耗尽）；部分目标失败（PartialFailure）重试耗尽后保留成功目标、仅告警失败目标。
 - **Monitor**：遍历全部启用 qB：连接状态/做种统计/真实磁盘/低速率中止/撤种判定（seeders≥10 或 minutes>60，AND/OR 可配，ratio 默认关）；0 进度副本不计时长。
-- **状态机**：种子级 6 态 + 记录级 8 态（BIZ-SPEC §5）；种子终态聚合规则：全部记录终态 + 无副本。
+- **状态机**：种子级 9 态 + 记录级 8 态（BIZ-SPEC §5）；种子终态聚合规则：全部记录终态 + 无副本。
 - **优雅退出**：stopCh + wg，所有 goroutine 可追踪。
 
 ## 8. 多 qB 与免鉴权拉起
@@ -110,47 +115,59 @@ strategies(id=1 单行: promotions/keywords/min_size/max_size,
   - 反代时重写 HTML 相对路径、剥离 X-Forwarded-For/Authorization、补齐 Referer；可配置跳过证书校验（自签场景）。
 - 预留 **DownloaderProvider 接口**（借鉴 Vertex 多下载器 registry）：当前实现 qB，未来可扩 Deluge/Transmission。
 
+> 实现修订（M3）：浏览器直连 qB WebUI 的免鉴权反向代理（`/qb/{instance}/` + WebSocket Hijack + SID 注入）**未实现**——当前后端仅以服务端 HTTP 客户端（qb 包）直连 qB 的 `/api/v2/*`，面板不代理 qB WebUI；相应端点已从 §10 移除。
+
 ## 9. 通知系统
 
-- Provider 注册表接口 `Send(ctx, instance, msg)`；内置 webhook/telegram/smtp/ntfy/gotify/serverchan/pushplus（后三个预留实现）。
+- Provider 注册表接口 `Send(ctx, msg)`；内置 webhook/telegram/smtp/ntfy/gotify/serverchan/pushplus（M3 全部实现）。
 - 实例：同 provider 可多份；notifier_routes 勾选矩阵（实例×tier）。
-- 聚合：同实例同 tier 10 分钟合并；critical 直通不合并；每日 digest 可选（info 层）。
-- **聚合补充（Vertex 借鉴）**：错误类事件另设「次数阈值 + 周期清零」熔断（如 1 小时内同类错误 >20 条暂停该事件）；Telegram 对进行中任务状态用 `editMessageText` 复用同一条消息防刷屏。
+- 聚合：同实例 × tier × 事件 10 分钟合并（critical 直通不合并）；每日 digest 未实现（预留）。
+- **熔断（Vertex 借鉴，实现为每实例熔断器）**：连续失败 5 次熔断 10 分钟，半开探测一次（成功闭合/失败重开）；Telegram 对 10 分钟内的连续消息用 `editMessageText` 复用同一条消息防刷屏。
 - 入站 webhook（预留）：apiKey 放路径、独立于 session 鉴权（外部系统反向触发）。
-- 事件 tier：critical（发布失败重试耗尽/qB 全断/磁盘 critical/cookie 过期）；warning（磁盘 low/单 qB 断连）；info（发布成功/降级辅种/自动撤种/digest）。
+- 事件 tier：critical（重试耗尽/qB 全断/磁盘 critical）；warning（磁盘 low/单 qB 断连/低速率中止/鉴权过期）；info（发布成功/交叉辅种/自动撤种）。
 - 全部默认关；测试发送按钮。
 
 ## 10. API 契约 v2（base /api/v2，除标注外均需 session + CSRF）
 
+> 本节为 M3 实现后逐条比对的**实际路由**（来源：`backend/internal/server/server.go`、`internal/api/deps.go`、`internal/api/ops_seeds.go`）。相对原始方案删减/更名的端点见 §17。
+
 | 域 | 端点 |
 |---|---|
+| 健康 | GET /health（无需鉴权） |
 | 鉴权 | POST /auth/login · POST /auth/logout · GET /auth/me |
-| 向导 | GET /setup/status · POST /setup/qb|source|targets|complete（**仅未初始化开放**） |
-| 仪表盘 | GET /dashboard（聚合：状态条+统计卡+进行中任务+事件流+7天趋势） |
-| 种子 | GET /seeds（筛选分页 SQL）· GET /seeds/{id}（含 records+replicas+log）· POST /seeds/{id}/retry|retire|skip · POST /seeds/{id}/republish（从失败点恢复）· POST /seeds/manual（multipart .torrent / URL+磁链 + target_ids） |
-| qB | GET/POST/PUT/DELETE /qb（实例 CRUD）· POST /qb/{id}/test · GET/PUT /qb/dispatch |
-| 站点 | CRUD /sources /targets · POST /targets/{id}/pause|resume|probe（枚举探测） |
-| 策略 | GET/PUT /strategies |
-| 通知 | CRUD /notify/instances · GET/PUT /notify/routes · POST /notify/{id}/test |
-| 预览 | GET /preview/fetch · GET /preview/seed · POST /preview/compare |
-| 日志 | GET /logs?level=&search=&page=（后端搜索，结构化） |
-| 备份 | GET /backup/export（zip 下载）· POST /backup/import（multipart zip，恢复前自动备份当前库） |
-| 代理 | /qb/{instance}/*（免鉴权拉起，见 §8） |
+| 向导 | GET /setup/status · POST /setup/complete（**仅未初始化开放**，设置初始面板密码） |
+| 仪表盘 | GET /dashboard（status 状态条 + stats 统计卡 + tasks 进行中 + events 事件流 + trend 7天趋势） |
+| 种子 | GET /seeds（筛选分页）· GET /seeds/{id}（含 records+replicas+log）· POST /seeds/{id}/resend（手动重发，body 可带 `full=true` 全量重跑）· DELETE /seeds/{id} |
+| 事件 | GET /events（活动日志，分页/筛选） |
+| 站点源 | GET/POST /sources · GET/PUT/DELETE /sources/{id} · POST /sources/{id}/test |
+| 目标站 | GET/POST /targets · GET/PUT/DELETE /targets/{id} · POST /targets/{id}/probe（枚举探测）· POST /targets/{id}/test |
+| qB | GET/POST /qb · GET/PUT/DELETE /qb/{id} · POST /qb/{id}/test |
+| 策略 | GET/PUT /strategy（单行） |
+| 通知 | GET/POST /notifiers · PUT/DELETE /notifiers/{id} · POST /notifiers/{id}/test · GET/PUT /notifiers/routes（路由矩阵） |
+| 备份 | GET /backup/export（zip 下载）· POST /backup/restore（multipart zip，校验后 staging，**重启生效**） |
 
-**中间件链**：Recovery → RequestID+结构化日志 → CSRF（自定义头+双提交）→ 限流（IP，可信代理可配）→ Session（内存，session_secret 签发）→ SetupGuard。
+**中间件链（实现修订）**：`Recovery → RequestID → SlogLogger（结构化日志）→ Auth`。Auth 中间件内部：未初始化 403（SetupGuard）→ 未登录 401 → POST/PUT/DELETE 校验 CSRF 403；`/health`、`/auth/login`、`/setup/*` 豁免。
+
+- **会话**：无状态 HMAC-SHA256 签名 cookie（`autoseed_session`，24h TTL，HttpOnly + SameSite=Lax）；签名密钥首启自动生成并持久化于 `app_settings.session_secret`（非内存、非 env）。
+- **CSRF**：双提交——`csrf_token` cookie + `X-CSRF-Token` 请求头，常量时间比较。
+- **限流**：仅登录接口，每 IP 每分钟 5 次（固定窗口，返回 Retry-After）。
+- **可信代理**：`SetTrustedProxies(nil)`——不信任 X-Forwarded-For，客户端 IP 不可伪造。
+- **服务器超时**：显式 `http.Server`，Read 15s / Write 60s / Idle 120s / ReadHeader 10s。
+- **SSRF 加固**：source 包所有出站请求前 `safeURL` 校验（仅 http/https，解析 IP 拒绝环回/私网/链路本地/组播，重定向逐跳复检）；响应体 `http.MaxBytesReader` 限流（RSS 10MB）。
+- **凭据脱敏**：API 返回一律掩码 `***`；错误串/通知正文经 `source.RedactError` 剥离 URL 内嵌凭据（passkey/token）。
 
 ## 11. 前端设计
 
-- 页面：Login / Setup（四步向导）/ Dashboard（五区）/ Seeds（抽屉详情）/ QB（多实例+分派）/ Config（站点+策略）/ Notify（实例+路由矩阵）/ Logs / Preview（字段对比）/ Backup（导出+恢复）。
-- stores：auth / seeds / qb / config / notify；api/ 下 axios 封装 + TS 类型（与后端契约对齐，契约由 Go struct 生成或手工同步）。
+- 页面（11 个 view）：Login / Setup（初始化向导）+ 9 个主页面——Dashboard（五区）/ Seeds（抽屉详情）/ Events（事件流）/ Sources（站点源）/ Targets（目标站）/ QB（多实例）/ Strategy（策略）/ Notifiers（实例+路由矩阵）/ Backup（导出+恢复）。相对原始方案：Config 拆为 Sources/Targets/Strategy 三页，Logs→Events，Preview 页移除（未实现）。
+- stores：auth（引导/登录/CSRF）；api/ 下 axios 封装（baseURL `/api/v2`，自动注入 `X-CSRF-Token`，统一处理 401/403）+ TS 类型。
 - 图表轻量自绘（趋势柱状），不引重图表库；Element Plus 按需引入。
 
 ## 12. Docker 打包（单容器）
 
 ```
-stage1 node:20-alpine   → pnpm build 前端 dist/
+stage1 node:20-alpine   → npm ci + npm run build 前端 dist/
 stage2 golang:1.22-alpine → embed dist/ 编 relay 静态二进制（CGO_ENABLED=0）
-stage3 alpine → relay + data/ 卷 + healthcheck（HTTP /api/v2/health）
+stage3 alpine → relay + data/ 卷 + healthcheck（wget HTTP /api/v2/health）
 ```
 - compose：单容器 + 可选外部 qB（`${QB_*}` 变量化，修好 .env 接线）；无任何硬编码凭据。
 - 数据：SQLite 文件 + master.key 挂卷；备份导出 zip 含数据库与脱敏配置。
@@ -197,3 +214,22 @@ stage3 alpine → relay + data/ 卷 + healthcheck（HTTP /api/v2/health）
 | LICENSE | 保留 |
 
 **CI 策略（用户确认 GitHub Actions）**：push main → 测试 + 构建 dev 镜像；打 tag → semver 镜像 + latest；初期**不做**自动部署到 VPS，VPS 手动 `docker compose pull && up -d`。
+
+## 17. 实现修订记录（M3 里程碑核对）
+
+本节记录 M3 实现后与原始方案（§1~§16）的偏差，作为版本演进依据；正文相应章节已同步。
+
+| 主题 | 原始方案 | M3 实现 |
+|---|---|---|
+| 存储/迁移 | sqlc + goose + PG 可选 | 手写 SQL 仓储 + 自研嵌入迁移器（`migrations/*.sql`，PRAGMA user_version）；仅 SQLite（modernc 纯 Go） |
+| 迁移文件 | — | 00001_init ~ 00006_seen_hashes（6 个；00003 仅推进版本号、无 DDL） |
+| 数据模型 | 无 app_settings/seen_hashes | 新增 app_settings（auth KV）、seen_hashes（永久去重 tombstone）、targets.tags_map、strategies 磁盘/低速率监控字段 |
+| 状态机 | 种子 6 态 | 种子 9 态（discovered/retry 内部态），记录 8 态不变（见 BIZ-SPEC §5） |
+| 会话 | 内存 session + session_secret 签发 | 无状态 HMAC cookie；secret 自动生成并持久化 app_settings |
+| qB 反代 | `/qb/{instance}/` 免鉴权拉起 + WebSocket | 未实现（后端仅服务端直连 qB） |
+| 通知 | 7 provider（后三个预留）+ 同实例同 tier 聚合 + digest | 7 provider 全部实现；聚合粒度实例×tier×事件；digest 未实现 |
+| API 端点 | setup 分步 / retry·retire·skip / manual / dispatch / pause·resume / preview / logs / import | 收敛为 §10 实际路由（resend 取代 retry/republish；events 取代 logs；restore 取代 import） |
+| 前端页面 | Login/Setup/Dashboard/Seeds/QB/Config/Notify/Logs/Preview/Backup | Login + Setup + 9 主页面（Config 拆为 Sources/Targets/Strategy，Logs→Events，Preview 移除） |
+| 打包 | pnpm build | npm ci + npm run build |
+
+验收注记：§10 与 `backend/internal/server/server.go`、`internal/api/deps.go`、`internal/api/ops_seeds.go` 逐条一致；§6 与 `backend/internal/store/migrations/00001~00006` 一致。

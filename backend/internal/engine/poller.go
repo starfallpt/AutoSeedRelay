@@ -101,11 +101,31 @@ func (e *Engine) ingestItem(ctx context.Context, src *store.Source, item *source
 
 	ih := source.GuidToInfohash(item.GUID, item.Link, item.Title)
 
+	// Permanent-tombstone dedup (M5): a hash that has ever been seen is skipped
+	// even if its seeds row was later deleted by cleanup or lost to a stale
+	// backup restore.
+	seen, err := e.repo.HasSeen(ctx, src.Name, ih)
+	if err != nil {
+		e.log.Error("poll: dedup seen lookup failed", "source", src.Name, "hash", ih, "error", err)
+		return
+	}
+	if seen {
+		return
+	}
+
+	// Not seen yet: tombstone it permanently before deciding whether to create a
+	// seed row. MarkSeen runs even when the seed row already exists, so a later
+	// manual delete cannot resurrect the hash.
+	if err := e.repo.MarkSeen(ctx, src.Name, ih); err != nil {
+		e.log.Error("poll: mark seen failed", "source", src.Name, "hash", ih, "error", err)
+		return
+	}
+
 	existing, err := e.repo.GetSeedByHash(ctx, src.Name, ih)
 	switch {
 	case err == nil && existing != nil:
-		// Already known. This covers the "retired → permanently skip" rule:
-		// a retired seed keeps its (source_site, info_hash) row, so it is never
+		// Already known. This covers the "retired → permanently skip" rule: a
+		// retired seed keeps its (source_site, info_hash) row, so it is never
 		// re-created here. Only an explicit manual republish re-opens it.
 		return
 	case err != nil && !errors.Is(err, sql.ErrNoRows):

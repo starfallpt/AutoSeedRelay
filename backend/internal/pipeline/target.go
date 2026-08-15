@@ -133,7 +133,7 @@ func (p *RelayOne) publishToOneTarget(ctx context.Context, seed *store.Seed, src
 			_ = p.repo.UpdateRecordAttempt(ctx, seed.ID, t.ID, statusFailed, source.RedactError(res.Detail))
 			return fmt.Errorf("publish reported not-ok: %s", res.Detail)
 		}
-		_ = p.repo.UpdateRecordStatus(ctx, seed.ID, t.ID, statusPublished, "")
+		_ = p.repo.MarkPublished(ctx, seed.ID, t.ID, p.now().Unix())
 		_ = p.repo.AppendLogSeed(ctx, seed.ID, "info", "published",
 			fmt.Sprintf("published to %s target_id=%d", t.Name, res.TargetID))
 		p.notify(ctx, notifier.LevelInfo, "发布成功",
@@ -172,7 +172,7 @@ func (p *RelayOne) finishCrossSeed(ctx context.Context, seed *store.Seed, t *sto
 		_ = p.repo.UpdateRecordAttempt(ctx, seed.ID, t.ID, statusFailed, source.RedactError(cerr.Error()))
 		return fmt.Errorf("cross-seed: %w", cerr)
 	}
-	_ = p.repo.UpdateRecordStatus(ctx, seed.ID, t.ID, statusCrossSeeded, "")
+	_ = p.repo.UpdateRecordStatus(ctx, seed.ID, t.ID, statusCrossSeeding, "")
 	_ = p.repo.AppendLogSeed(ctx, seed.ID, "info", "cross_seeding",
 		fmt.Sprintf("cross-seeded to %s (duplicate)", t.Name))
 	p.notify(ctx, notifier.LevelInfo, "交叉辅种",

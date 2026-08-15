@@ -86,6 +86,25 @@ func (r *Repo) SetRecordRole(ctx context.Context, seedID, targetID int64, role s
 	return nil
 }
 
+// MarkPublished marks a record published and stamps published_at with the given
+// Unix-second timestamp. published_at is only written when it is not yet set
+// (first publish time is preserved), mirroring the once-only publish success
+// path. It never touches retired_at / retire_reason — only MarkRetired may
+// write those columns.
+func (r *Repo) MarkPublished(ctx context.Context, seedID, targetID int64, publishedAt int64) error {
+	_, err := r.db.ExecContext(ctx, `
+		UPDATE relay_records SET
+			status = 'published',
+			last_error = '',
+			published_at = CASE WHEN published_at = 0 THEN ? ELSE published_at END,
+			updated_at = unixepoch()
+		WHERE seed_id = ? AND target_id = ?`, publishedAt, seedID, targetID)
+	if err != nil {
+		return fmt.Errorf("store: mark record published: %w", err)
+	}
+	return nil
+}
+
 // UpdateRecordStatus sets a record's status and error text for a (seed, target)
 // pair. It never touches retired_at / retire_reason — only MarkRetired may
 // write those columns.

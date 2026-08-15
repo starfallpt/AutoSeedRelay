@@ -13,7 +13,14 @@ services:
       AUTOSEED_WEB_PASSWORD: ${AUTOSEED_WEB_PASSWORD:-}
       # 凭据加密主密钥（64位hex）；留空则首启自动生成到 /data/master.key
       AUTOSEED_MASTER_KEY: ${AUTOSEED_MASTER_KEY:-}
+    # 会话签名密钥无独立 env——首启自动生成并持久化于 DB（app_settings）
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:9020/api/v2/health || exit 1"]
+      interval: 30s
+      timeout: 3s
+      start_period: 10s
+      retries: 3
 
 volumes:
   relay-data:
