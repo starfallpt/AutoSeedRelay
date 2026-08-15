@@ -319,6 +319,8 @@ func TestConfigStrategyRoundtrip(t *testing.T) {
 		"dispatch_mode": "round_robin", "timezone": "Asia/Shanghai",
 		"retire_ratio_enabled": true, "retire_ratio": 1.5, "retry_max": 5,
 		"promotions": []string{"free"}, "keywords": []string{"x264"},
+		"disk_low_gb": 30, "disk_critical_gb": 10, "low_speed_kbps": 50,
+		"low_speed_duration_sec": 120, "low_speed_action": "warn",
 	})
 	if w.Code != http.StatusOK {
 		t.Fatalf("put status=%d body=%s", w.Code, w.Body.String())
@@ -331,6 +333,11 @@ func TestConfigStrategyRoundtrip(t *testing.T) {
 	}
 	if got["retire_ratio_enabled"] != true {
 		t.Fatalf("retire_ratio_enabled = %v", got["retire_ratio_enabled"])
+	}
+	if got["disk_low_gb"] != float64(30) || got["disk_critical_gb"] != float64(10) ||
+		got["low_speed_kbps"] != float64(50) || got["low_speed_duration_sec"] != float64(120) ||
+		got["low_speed_action"] != "warn" {
+		t.Fatalf("strategy monitor fields after put = %v", got)
 	}
 }
 

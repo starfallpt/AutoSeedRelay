@@ -28,6 +28,11 @@ type strategyDTO struct {
 	ImageHost          json.RawMessage `json:"image_host"`
 	ImageCoverEnabled  bool            `json:"image_cover_enabled"`
 	RetryMax           int64           `json:"retry_max"`
+	DiskLowGB          int64           `json:"disk_low_gb"`
+	DiskCriticalGB     int64           `json:"disk_critical_gb"`
+	LowSpeedKbps       int64           `json:"low_speed_kbps"`
+	LowSpeedDurationSec int64          `json:"low_speed_duration_sec"`
+	LowSpeedAction     string          `json:"low_speed_action"`
 }
 
 func (d *strategyDTO) toStore() *store.Strategy {
@@ -47,6 +52,11 @@ func (d *strategyDTO) toStore() *store.Strategy {
 		ImageHost:          rawToJSONStringDefault(d.ImageHost, "{}"),
 		ImageCoverEnabled:  boolToInt(d.ImageCoverEnabled),
 		RetryMax:           d.RetryMax,
+		DiskLowGB:          d.DiskLowGB,
+		DiskCriticalGB:     d.DiskCriticalGB,
+		LowSpeedKbps:       d.LowSpeedKbps,
+		LowSpeedDurationSec: d.LowSpeedDurationSec,
+		LowSpeedAction:     d.LowSpeedAction,
 	}
 }
 
@@ -67,6 +77,11 @@ func strategyDTOFromStore(s *store.Strategy) strategyDTO {
 		ImageHost:          jsonStringToRaw(s.ImageHost),
 		ImageCoverEnabled:  s.ImageCoverEnabled != 0,
 		RetryMax:           s.RetryMax,
+		DiskLowGB:          s.DiskLowGB,
+		DiskCriticalGB:     s.DiskCriticalGB,
+		LowSpeedKbps:       s.LowSpeedKbps,
+		LowSpeedDurationSec: s.LowSpeedDurationSec,
+		LowSpeedAction:     s.LowSpeedAction,
 	}
 }
 

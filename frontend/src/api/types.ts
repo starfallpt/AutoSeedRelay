@@ -160,6 +160,12 @@ export interface Strategy {
   image_host: JSONObject | null
   image_cover_enabled: boolean
   retry_max: number
+  disk_low_gb: number
+  disk_critical_gb: number
+  low_speed_kbps: number
+  low_speed_duration_sec: number
+  /** abort（中止下载） | warn（仅告警） */
+  low_speed_action: 'abort' | 'warn'
 }
 
 export type StrategyInput = Strategy

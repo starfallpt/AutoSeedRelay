@@ -19,6 +19,11 @@ interface StrategyForm {
   image_host_text: string
   image_cover_enabled: boolean
   retry_max: number
+  disk_low_gb: number
+  disk_critical_gb: number
+  low_speed_kbps: number
+  low_speed_duration_sec: number
+  low_speed_action: 'abort' | 'warn'
 }
 
 const form = reactive<StrategyForm>({
@@ -36,6 +41,11 @@ const form = reactive<StrategyForm>({
   image_host_text: '',
   image_cover_enabled: false,
   retry_max: 3,
+  disk_low_gb: 50,
+  disk_critical_gb: 20,
+  low_speed_kbps: 100,
+  low_speed_duration_sec: 600,
+  low_speed_action: 'abort',
 })
 
 const dispatchOptions: { label: string; value: DispatchMode }[] = [
@@ -80,6 +90,11 @@ function applyStrategy(data: Strategy | null | undefined): void {
   form.image_host_text = data?.image_host ? JSON.stringify(data.image_host, null, 2) : ''
   form.image_cover_enabled = data?.image_cover_enabled ?? false
   form.retry_max = data?.retry_max ?? 3
+  form.disk_low_gb = data?.disk_low_gb ?? 50
+  form.disk_critical_gb = data?.disk_critical_gb ?? 20
+  form.low_speed_kbps = data?.low_speed_kbps ?? 100
+  form.low_speed_duration_sec = data?.low_speed_duration_sec ?? 600
+  form.low_speed_action = data?.low_speed_action === 'warn' ? 'warn' : 'abort'
 }
 
 async function load(): Promise<void> {
@@ -147,6 +162,11 @@ async function save(): Promise<void> {
       image_host: imageHost.value ?? null,
       image_cover_enabled: form.image_cover_enabled,
       retry_max: form.retry_max,
+      disk_low_gb: form.disk_low_gb,
+      disk_critical_gb: form.disk_critical_gb,
+      low_speed_kbps: form.low_speed_kbps,
+      low_speed_duration_sec: form.low_speed_duration_sec,
+      low_speed_action: form.low_speed_action,
     }
     await api.put('/strategy', payload)
     ElMessage.success('策略已保存')
@@ -234,6 +254,43 @@ onMounted(load)
             <el-input-number v-model="form.max_size" :min="0" controls-position="right" />
             <span class="unit-hint">0 表示不限</span>
           </div>
+        </el-form-item>
+
+        <el-divider content-position="left">监控阈值</el-divider>
+
+        <el-form-item label="磁盘警告（GB）">
+          <div class="inline-field">
+            <el-input-number v-model="form.disk_low_gb" :min="0" controls-position="right" />
+            <span class="unit-hint">可用空间低于该值告警</span>
+          </div>
+        </el-form-item>
+
+        <el-form-item label="磁盘紧急（GB）">
+          <div class="inline-field">
+            <el-input-number v-model="form.disk_critical_gb" :min="0" controls-position="right" />
+            <span class="unit-hint">可用空间低于该值视为紧急</span>
+          </div>
+        </el-form-item>
+
+        <el-form-item label="低速率（KB/s）">
+          <div class="inline-field">
+            <el-input-number v-model="form.low_speed_kbps" :min="0" controls-position="right" />
+            <span class="unit-hint">低于该下载速率视为停滞</span>
+          </div>
+        </el-form-item>
+
+        <el-form-item label="低速率持续（秒）">
+          <div class="inline-field">
+            <el-input-number v-model="form.low_speed_duration_sec" :min="0" controls-position="right" />
+            <span class="unit-hint">持续该时长才触发动作</span>
+          </div>
+        </el-form-item>
+
+        <el-form-item label="低速率动作">
+          <el-select v-model="form.low_speed_action" style="width: 260px">
+            <el-option label="中止下载" value="abort" />
+            <el-option label="仅告警" value="warn" />
+          </el-select>
         </el-form-item>
 
         <el-divider content-position="left">自动撤种</el-divider>
