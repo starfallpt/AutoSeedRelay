@@ -8,12 +8,14 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/autoseedrelay/relay/internal/notifier"
 	"github.com/autoseedrelay/relay/internal/qb"
 	"github.com/autoseedrelay/relay/internal/source"
 	"github.com/autoseedrelay/relay/internal/store"
@@ -74,15 +76,32 @@ func (c *fakeClock) Advance(d time.Duration) {
 type fakePipeline struct {
 	mu    sync.Mutex
 	calls []int64
-	err   error
+	err   error   // fallback single error (existing tests)
+	seq   []error // per-call error sequence; sticks to the last entry once exhausted
 }
 
 func (f *fakePipeline) Relay(_ context.Context, seedID int64) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, seedID)
+	if len(f.seq) > 0 {
+		i := len(f.calls) - 1
+		if i < len(f.seq) {
+			return f.seq[i]
+		}
+		return f.seq[len(f.seq)-1]
+	}
 	return f.err
 }
+
+// fakePartialFailure is an engine-local stand-in for pipeline.PartialFailure,
+// letting the engine's structural detection be tested without importing
+// pipeline.
+type fakePartialFailure struct{ failed []string }
+
+func (f *fakePartialFailure) Error() string { return "partial: " + strings.Join(f.failed, ", ") }
+func (f *fakePartialFailure) IsPartial() bool { return true }
+func (f *fakePartialFailure) FailedNames() []string { return f.failed }
 
 func (f *fakePipeline) count() int {
 	f.mu.Lock()
@@ -94,6 +113,25 @@ func (f *fakePipeline) ids() []int64 {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]int64(nil), f.calls...)
+}
+
+// recordingNotifier captures every delivered message.
+type recordingNotifier struct {
+	mu    sync.Mutex
+	calls []notifier.Message
+}
+
+func (n *recordingNotifier) Send(_ context.Context, msg notifier.Message) error {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.calls = append(n.calls, msg)
+	return nil
+}
+
+func (n *recordingNotifier) messages() []notifier.Message {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return append([]notifier.Message(nil), n.calls...)
 }
 
 // fakeQB is an httptest-backed qB WebUI API with controllable torrent list and
@@ -307,8 +345,8 @@ func seedAndRecord(t *testing.T, repo *store.Repo, status, recordStatus string) 
 		t.Fatal(err)
 	}
 	rec := &store.RelayRecord{SeedID: sd.ID, TargetID: tgt.ID, Role: "publisher", Status: recordStatus}
-	if err := repo.UpsertRecord(ctx, rec); err != nil {
-		t.Fatal(err)
+	if inserted, err := repo.UpsertRecord(ctx, rec); err != nil || !inserted {
+		t.Fatalf("UpsertRecord = (%v, %v), want (true, nil)", inserted, err)
 	}
 	return sd.ID, tgt.ID
 }
@@ -678,5 +716,309 @@ func TestEngineStartStop(t *testing.T) {
 	}
 	if eng.Running() {
 		t.Fatal("engine still running after Stop")
+	}
+}
+
+func TestRetryRedactsCredential(t *testing.T) {
+	repo := newTestRepo(t)
+	const secret = "sekrit-passkey-987"
+	pl := &fakePipeline{err: errors.New("download https://src.example/download.php?id=1&passkey=" + secret + " failed")}
+	rec := &recordingNotifier{}
+	router := notifier.NewRouter()
+	router.Add("rec", rec, notifier.LevelCritical)
+	eng := New(Config{Workers: 1}, repo, pl, qb.NewManager(), router)
+
+	sd := &store.Seed{SourceSite: "src", InfoHash: testHash, Title: "T", Status: "discovered"}
+	if _, err := repo.CreateSeed(ctx, sd); err != nil {
+		t.Fatal(err)
+	}
+
+	// retryNo = 3 == RetryMax → exhausted → writes seeds.error + critical notify.
+	eng.submitJob(ctx, sd.ID, 3)
+
+	got, err := repo.GetSeedByID(ctx, sd.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != "failed" {
+		t.Fatalf("status = %q, want failed", got.Status)
+	}
+	if strings.Contains(got.Error, secret) {
+		t.Fatalf("seeds.error leaks passkey: %q", got.Error)
+	}
+	if !strings.Contains(got.Error, "?[redacted]") {
+		t.Fatalf("seeds.error should carry redacted marker: %q", got.Error)
+	}
+
+	msgs := rec.messages()
+	if len(msgs) == 0 {
+		t.Fatal("expected a critical notification")
+	}
+	for _, m := range msgs {
+		if strings.Contains(m.Body, secret) || strings.Contains(m.Title, secret) {
+			t.Fatalf("notify leaks passkey: %+v", m)
+		}
+	}
+}
+
+// --- partial-failure retry tests ---
+
+// seedingPipeline simulates a real pipeline that owns seed.status: the first
+// call returns a partial failure, subsequent calls mark the seed "seeding" and
+// succeed.
+type seedingPipeline struct {
+	repo *store.Repo
+	mu   sync.Mutex
+	calls int
+}
+
+func (s *seedingPipeline) Relay(ctx context.Context, seedID int64) error {
+	s.mu.Lock()
+	s.calls++
+	call := s.calls
+	s.mu.Unlock()
+	if call == 1 {
+		return &fakePartialFailure{failed: []string{"t1"}}
+	}
+	_ = s.repo.UpdateSeedStatus(ctx, seedID, "seeding", "")
+	return nil
+}
+
+func TestPartialFailureRetryThenSuccess(t *testing.T) {
+	repo := newTestRepo(t)
+	pl := &seedingPipeline{repo: repo}
+	eng := New(Config{Workers: 1}, repo, pl, qb.NewManager(), nil)
+	eng.SetClock(func() time.Time { return time.Unix(1_700_000_000, 0) })
+
+	sd := &store.Seed{SourceSite: "src", InfoHash: testHash, Title: "T", Status: "discovered"}
+	if _, err := repo.CreateSeed(ctx, sd); err != nil {
+		t.Fatal(err)
+	}
+
+	// Attempt 0 → partial failure → retry scheduled, seed marked retry.
+	eng.submitJob(ctx, sd.ID, 0)
+	got, _ := repo.GetSeedByID(ctx, sd.ID)
+	if got.Status != "retry" {
+		t.Fatalf("status after partial failure = %q, want retry", got.Status)
+	}
+
+	// Retry #1 → success → pipeline marks seed seeding.
+	eng.submitJob(ctx, sd.ID, 1)
+	got, _ = repo.GetSeedByID(ctx, sd.ID)
+	if got.Status != "seeding" {
+		t.Fatalf("status after successful retry = %q, want seeding", got.Status)
+	}
+}
+
+func TestPartialFailureExhausted(t *testing.T) {
+	repo := newTestRepo(t)
+	pl := &fakePipeline{seq: []error{&fakePartialFailure{failed: []string{"t1", "t2"}}}}
+	rec := &recordingNotifier{}
+	router := notifier.NewRouter()
+	router.Add("rec", rec, notifier.LevelCritical)
+	eng := New(Config{Workers: 1}, repo, pl, qb.NewManager(), router)
+
+	sd := &store.Seed{SourceSite: "src", InfoHash: testHash, Title: "T", Status: "discovered"}
+	if _, err := repo.CreateSeed(ctx, sd); err != nil {
+		t.Fatal(err)
+	}
+
+	// retryNo = 3 == RetryMax → exhausted → keep successes (seeding) + critical.
+	eng.submitJob(ctx, sd.ID, 3)
+
+	got, _ := repo.GetSeedByID(ctx, sd.ID)
+	if got.Status != "seeding" {
+		t.Fatalf("status = %q, want seeding (preserve successful targets)", got.Status)
+	}
+
+	msgs := rec.messages()
+	if len(msgs) == 0 {
+		t.Fatal("expected a critical notification")
+	}
+	found := false
+	for _, m := range msgs {
+		if strings.Contains(m.Body, "t1") && strings.Contains(m.Body, "t2") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("critical notification should list failed targets t1/t2: %+v", msgs)
+	}
+}
+
+// --- strategy filter tests ---
+
+func TestPollerKeywordFilter(t *testing.T) {
+	repo := newTestRepo(t)
+	pl := &fakePipeline{}
+	eng := New(Config{Workers: 2}, repo, pl, qb.NewManager(), nil)
+
+	st, err := repo.GetStrategy(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.Keywords = `["2160p", "x264"]`
+	if err := repo.UpdateStrategy(ctx, st); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := repo.UpsertSource(ctx, &store.Source{Name: "src", Role: "source", RSSURL: "http://x/rss", Status: "active"}); err != nil {
+		t.Fatal(err)
+	}
+	eng.SetFetchRSS(func(_ context.Context, _ string, _ *http.Client) ([]source.RssItem, error) {
+		return []source.RssItem{
+			{GUID: testHash, Title: "Movie.2160p.WEB-DL", Link: "http://x?id=1", Description: "no"},
+			{GUID: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", Title: "Movie.1080p", Link: "http://x?id=2", Description: "remux x264"},
+			{GUID: "cccccccccccccccccccccccccccccccccccccccc", Title: "Movie.720p", Link: "http://x?id=3", Description: "no match"},
+		}, nil
+	})
+
+	eng.poll(ctx)
+
+	// Only the first two match a keyword (title "2160p" and description "x264").
+	if n := rawCount(t, repo, `SELECT count(*) FROM seeds`); n != 2 {
+		t.Fatalf("seed count = %d, want 2", n)
+	}
+}
+
+func TestPollerSizeFilter(t *testing.T) {
+	repo := newTestRepo(t)
+	pl := &fakePipeline{}
+	eng := New(Config{Workers: 2}, repo, pl, qb.NewManager(), nil)
+
+	st, err := repo.GetStrategy(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.MinSize = 100
+	st.MaxSize = 200
+	if err := repo.UpdateStrategy(ctx, st); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := repo.UpsertSource(ctx, &store.Source{Name: "src", Role: "source", RSSURL: "http://x/rss", Status: "active"}); err != nil {
+		t.Fatal(err)
+	}
+	eng.SetFetchRSS(func(_ context.Context, _ string, _ *http.Client) ([]source.RssItem, error) {
+		small := int64(50)
+		mid := int64(150)
+		big := int64(500)
+		return []source.RssItem{
+			{GUID: testHash, Title: "Small", Link: "http://x?id=1", Size: &small},
+			{GUID: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", Title: "Mid", Link: "http://x?id=2", Size: &mid},
+			{GUID: "cccccccccccccccccccccccccccccccccccccccc", Title: "Big", Link: "http://x?id=3", Size: &big},
+			{GUID: "dddddddddddddddddddddddddddddddddddddddd", Title: "NoSize", Link: "http://x?id=4"},
+		}, nil
+	})
+
+	eng.poll(ctx)
+
+	// Only "Mid" (150) and "NoSize" (unknown → not filtered) pass.
+	if n := rawCount(t, repo, `SELECT count(*) FROM seeds`); n != 2 {
+		t.Fatalf("seed count = %d, want 2 (mid + unknown size)", n)
+	}
+}
+
+// --- monitor ownership test ---
+
+func TestMonitorSameHashDifferentSeedNoRetire(t *testing.T) {
+	repo := newTestRepo(t)
+	// Two distinct seeds (different source_site) sharing one info_hash, both
+	// "seeding" and without any replica rows (historical data). The hash is
+	// ambiguous on this qB, so neither may be retired.
+	sd1 := &store.Seed{SourceSite: "src1", InfoHash: testHash, Title: "A", Status: "seeding"}
+	sd2 := &store.Seed{SourceSite: "src2", InfoHash: testHash, Title: "B", Status: "seeding"}
+	if _, err := repo.CreateSeed(ctx, sd1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.CreateSeed(ctx, sd2); err != nil {
+		t.Fatal(err)
+	}
+
+	qbMgr := qb.NewManager()
+	_, fq := registerFakeQB(t, repo, qbMgr, "qb", 1, []*qb.TorrentInfo{
+		completedTorrent(testHash, 15, time.Unix(1_700_000_000, 0).Add(-90*time.Minute).Unix()),
+	}, 0)
+
+	eng := New(Config{Workers: 1}, repo, &fakePipeline{}, qbMgr, nil)
+	eng.SetClock(func() time.Time { return time.Unix(1_700_000_000, 0) })
+
+	eng.monitor(ctx)
+
+	for _, id := range []int64{sd1.ID, sd2.ID} {
+		got, err := repo.GetSeedByID(ctx, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Status != "seeding" {
+			t.Fatalf("seed %d status = %q, want seeding (ambiguous hash must not retire)", id, got.Status)
+		}
+	}
+	if fq.deleteCount() != 0 {
+		t.Fatalf("delete count = %d, want 0", fq.deleteCount())
+	}
+}
+
+// --- lifecycle concurrency test ---
+
+func TestEngineStopRestartConcurrent(t *testing.T) {
+	// Self-managed temp dir (not t.TempDir): the concurrent Start/Stop churn
+	// cancels in-flight SQLite queries, and on Windows modernc/sqlite can lag
+	// releasing the WAL/SHM file handles past db.Close. Removal is best-effort
+	// with retries so this environment quirk cannot fail the test.
+	dir, err := os.MkdirTemp("", "asr-engine-conc-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		_ = os.RemoveAll(dir)
+		t.Fatalf("store.Open: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = st.DB().Exec("PRAGMA wal_checkpoint(TRUNCATE)")
+		_ = st.Close()
+		for i := 0; i < 100; i++ {
+			if os.RemoveAll(dir) == nil {
+				return
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+	})
+	repo := store.NewRepo(st.DB(), testKey())
+
+	pl := &fakePipeline{}
+	eng := New(Config{Workers: 2, PollInterval: time.Hour, MonitorInterval: time.Hour}, repo, pl, qb.NewManager(), nil)
+	eng.SetFetchRSS(func(_ context.Context, _ string, _ *http.Client) ([]source.RssItem, error) {
+		return nil, nil
+	})
+
+	var wg sync.WaitGroup
+	for i := 0; i < 6; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := eng.Start(ctx); err != nil && err != errAlreadyRunning {
+				t.Errorf("Start: %v", err)
+			}
+			if err := eng.Stop(ctx); err != nil {
+				t.Errorf("Stop: %v", err)
+			}
+		}()
+	}
+	wg.Wait()
+
+	// After all the churn the engine must be fully stopped and cleanly restarted.
+	if err := eng.Start(ctx); err != nil {
+		t.Fatalf("final Start: %v", err)
+	}
+	if !eng.Running() {
+		t.Fatal("engine not running after final Start")
+	}
+	if err := eng.Stop(ctx); err != nil {
+		t.Fatalf("final Stop: %v", err)
+	}
+	if eng.Running() {
+		t.Fatal("engine still running after final Stop")
 	}
 }

@@ -3,9 +3,12 @@
 package server
 
 import (
+	"context"
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"time"
@@ -53,9 +56,55 @@ func New(cfg *config.Config, logger *slog.Logger, deps Deps) (*Server, error) {
 	return s, nil
 }
 
-// Run starts the HTTP server and blocks until it stops.
-func (s *Server) Run() error {
-	return s.engine.Run(s.cfg.ListenAddr)
+// Run starts the HTTP server and blocks until ctx is cancelled, at which point
+// it gracefully shuts down: it stops accepting new connections, drains in-flight
+// requests for up to 10s, and returns nil once the listener (and thus the port)
+// is released. It uses an explicit http.Server with read/write/idle/header
+// timeouts (replacing the bare ListenAndServe) and disables proxy-header trust
+// so X-Forwarded-For cannot spoof client IPs.
+func (s *Server) Run(ctx context.Context) error {
+	_ = s.engine.SetTrustedProxies(nil)
+	srv := &http.Server{
+		Addr:              s.cfg.ListenAddr,
+		Handler:           s.engine,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      60 * time.Second,
+		IdleTimeout:       120 * time.Second,
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+
+	// Bind synchronously so Run returns a bind error immediately and so a
+	// shutdown always has a listener to close (no bind/serve race).
+	ln, err := net.Listen("tcp", s.cfg.ListenAddr)
+	if err != nil {
+		return err
+	}
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- srv.Serve(ln) }()
+
+	select {
+	case err := <-errCh:
+		// The server exited on its own (Serve failed).
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			return err
+		}
+		return nil
+	case <-ctx.Done():
+		// Graceful shutdown: stop accepting new conns and drain in-flight
+		// requests, bounded by a 10s timeout.
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			return err
+		}
+		// Drain the Serve goroutine so the listener is fully closed (port
+		// released) before Run returns.
+		if err := <-errCh; err != nil && !errors.Is(err, http.ErrServerClosed) {
+			return err
+		}
+		return nil
+	}
 }
 
 // Handler exposes the engine for embedding in tests or a supervisor.

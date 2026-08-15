@@ -390,3 +390,120 @@ func TestParseCookie(t *testing.T) {
 		t.Errorf("cookie = %v", c)
 	}
 }
+
+func TestRedactURL(t *testing.T) {
+	cases := map[string]string{
+		"https://dev.example.org/download.php?id=1&passkey=secret": "https://dev.example.org/download.php?[redacted]",
+		"http://host:8080/path":                                   "http://host:8080/path",
+		"https://user:pass@host/p?token=x":                        "https://host/p?[redacted]",
+		"not a url":                                               "not a url",
+	}
+	for in, want := range cases {
+		if got := RedactURL(in); got != want {
+			t.Errorf("RedactURL(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestRedactError(t *testing.T) {
+	got := RedactError("下载 https://dev.example.org/dl.php?passkey=SECRET 失败")
+	if strings.Contains(got, "SECRET") {
+		t.Fatalf("RedactError leaked secret: %q", got)
+	}
+	if !strings.Contains(got, "?[redacted]") {
+		t.Fatalf("RedactError missing redaction marker: %q", got)
+	}
+}
+
+func TestDownloadErrorRedactsPasskey(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	const passkey = "super-secret-passkey-xyz"
+	c := NewClient(srv.URL, ClientOptions{
+		DownloadMode: "direct",
+		Passkey:      passkey,
+		URLChecker:   func(string) error { return nil },
+		HTTPClient:   &http.Client{Timeout: 5 * time.Second},
+	})
+	it := &RssItem{ID: "1", Link: srv.URL + "/details.php?id=1"}
+	ok, err := c.DownloadTorrent(context.Background(), it, filepath.Join(t.TempDir(), "x.torrent"))
+	if ok {
+		t.Fatal("DownloadTorrent() ok = true, want false")
+	}
+	if err == nil {
+		t.Fatal("DownloadTorrent() err = nil, want error")
+	}
+	if strings.Contains(err.Error(), passkey) {
+		t.Fatalf("download error leaks passkey: %v", err)
+	}
+	if !strings.Contains(err.Error(), "?[redacted]") {
+		t.Fatalf("download error should carry redacted marker: %v", err)
+	}
+}
+
+func TestSafeRedirectCheckBlocksInternal(t *testing.T) {
+	check := safeRedirectCheck(nil)
+	for _, u := range []string{"http://127.0.0.1/", "http://169.254.169.254/latest/meta-data/"} {
+		req, err := http.NewRequest(http.MethodGet, u, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := check(req, nil); err == nil {
+			t.Fatalf("safeRedirectCheck(%q) = nil, want rejection", u)
+		}
+	}
+}
+
+func TestSafeDialContextRejectsLoopback(t *testing.T) {
+	for _, addr := range []string{"127.0.0.1:80", "169.254.169.254:80"} {
+		if _, err := safeDialContext(context.Background(), "tcp", addr); err == nil {
+			t.Fatalf("safeDialContext(%q) = nil, want rejection", addr)
+		}
+	}
+}
+
+func TestNormalizePromotion(t *testing.T) {
+	cases := map[string]string{
+		"free":        "free",
+		"免费":          "free",
+		"pro_free":    "free",
+		"2x_free":     "2x_free",
+		"2xfree":      "2x_free",
+		"2x免费":        "2x_free",
+		"pro_free2up": "2x_free",
+		"2x":          "2x",
+		"pro_2up":     "2x",
+		"50%":         "50%",
+		"pro_50pctdown": "50%",
+		"30%":         "30%",
+		"neutral":     "neutral",
+		"":            "",
+		"unknown":     "",
+	}
+	for in, want := range cases {
+		if got := NormalizePromotion(in); got != want {
+			t.Errorf("NormalizePromotion(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestParsePromotion(t *testing.T) {
+	html := `<table>
+<tr><td class="rowhead">促销</td><td class="rowfollow">免费</td></tr>
+</table>`
+	if got := ParsePromotion(html); got != "免费" {
+		t.Fatalf("ParsePromotion(row) = %q, want 免费", got)
+	}
+
+	htmlImg := `<span><img class="pro_free2up" /></span>`
+	if got := ParsePromotion(htmlImg); got != "pro_free2up" {
+		t.Fatalf("ParsePromotion(img) = %q, want pro_free2up", got)
+	}
+
+	if got := ParsePromotion(`<table><tr><td class="rowhead">标签</td><td class="rowfollow">x</td></tr></table>`); got != "" {
+		t.Fatalf("ParsePromotion(none) = %q, want empty", got)
+	}
+}

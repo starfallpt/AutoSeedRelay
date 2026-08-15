@@ -46,22 +46,29 @@ func DefaultBackoff(attempt int) time.Duration {
 
 // safeURL 校验待请求的 URL,防 SSRF:仅允许 http/https,并把主机名解析成 IP 后
 // 拒绝环回/私网/链路本地/保留地址段。解析失败时默认拒绝(fail-closed)。
+// 错误信息中的 URL 一律经过 RedactURL 脱敏,避免把 query 里的 passkey 外泄。
 func safeURL(raw string) error {
 	u, err := url.Parse(raw)
 	if err != nil {
-		return fmt.Errorf("非法 URL %q: %w", raw, err)
+		return fmt.Errorf("非法 URL %q: %w", RedactURL(raw), err)
 	}
 	if u.Scheme != "http" && u.Scheme != "https" {
 		return fmt.Errorf("仅允许 http/https 协议,拒绝 %q", u.Scheme)
 	}
 	host := u.Hostname()
 	if host == "" {
-		return fmt.Errorf("URL %q 缺少主机名", raw)
+		return fmt.Errorf("URL %q 缺少主机名", RedactURL(raw))
 	}
 	ips, err := net.LookupIP(host)
 	if err != nil {
 		return fmt.Errorf("解析主机 %q 失败: %w", host, err)
 	}
+	return checkIPs(host, ips)
+}
+
+// checkIPs 校验一组解析出的 IP:任一落在 SSRF 敏感段即拒绝(fail-closed)。
+// 供 safeURL 与拨号层复用,保证"预检"与"拨号"用同一套私有/环回判断。
+func checkIPs(host string, ips []net.IP) error {
 	if len(ips) == 0 {
 		return fmt.Errorf("主机 %q 未解析到任何 IP", host)
 	}
@@ -99,6 +106,53 @@ func isUnsafeIP(ip net.IP) bool {
 		}
 	}
 	return false
+}
+
+// safeDialContext 是自定义 Transport 的拨号钩子:解析 host 后校验每一枚 IP,再
+// 直接用校验过的 IP 拨号(解析与拨号同一 IP,消除 DNS rebinding 的 TOCTOU)。
+func safeDialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return nil, err
+	}
+	ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	if err != nil {
+		return nil, fmt.Errorf("解析主机 %q 失败: %w", host, err)
+	}
+	plain := make([]net.IP, 0, len(ips))
+	for _, ia := range ips {
+		plain = append(plain, ia.IP)
+	}
+	if err := checkIPs(host, plain); err != nil {
+		return nil, err
+	}
+	var d net.Dialer
+	var lastErr error
+	for _, ip := range plain {
+		conn, err := d.DialContext(ctx, network, net.JoinHostPort(ip.String(), port))
+		if err == nil {
+			return conn, nil
+		}
+		lastErr = err
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("主机 %q 无可拨号地址", host)
+	}
+	return nil, lastErr
+}
+
+// safeRedirectCheck 返回一个 CheckRedirect:对每一跳目标重跑 checkURL(默认
+// safeURL),命中 SSRF 敏感地址时返回错误停止跟随,从而逐跳复检重定向。
+func safeRedirectCheck(checkURL func(string) error) func(*http.Request, []*http.Request) error {
+	if checkURL == nil {
+		checkURL = safeURL
+	}
+	return func(req *http.Request, via []*http.Request) error {
+		if err := checkURL(req.URL.String()); err != nil {
+			return fmt.Errorf("拒绝跟随重定向到 %s: %w", RedactURL(req.URL.String()), err)
+		}
+		return nil
+	}
 }
 
 // readBody 用 http.MaxBytesReader 限制响应体大小后读取;超限返回 *http.MaxBytesError。
@@ -228,6 +282,11 @@ func NewClient(rssURL string, opts ClientOptions) *Client {
 			if pu, err := url.Parse(proxy); err == nil {
 				transport.Proxy = http.ProxyURL(pu)
 			}
+		} else {
+			// 直连(无显式代理)时在拨号层复验 IP,消除 DNS rebinding TOCTOU。
+			// 走代理时目标校验由 safeURL 预检完成,拨号目标是代理本身。
+			transport.Proxy = nil
+			transport.DialContext = safeDialContext
 		}
 		client = &http.Client{Timeout: timeout, Transport: transport}
 	}
@@ -353,7 +412,7 @@ func (c *Client) DownloadTorrent(ctx context.Context, item *RssItem, outPath str
 			lastErr = err
 			continue
 		}
-		if err := os.WriteFile(outPath, data, 0o644); err != nil {
+		if err := os.WriteFile(outPath, data, 0o600); err != nil {
 			return false, err
 		}
 		return true, nil
@@ -383,9 +442,9 @@ func (c *Client) downloadRaw(ctx context.Context, u string) ([]byte, error) {
 			}
 			continue
 		}
-		return nil, fmt.Errorf("下载 %s: HTTP %d 响应不是有效 .torrent(可能被 WAF/登录页拦截)", u, status)
+		return nil, fmt.Errorf("下载 %s: HTTP %d 响应不是有效 .torrent(可能被 WAF/登录页拦截)", RedactURL(u), status)
 	}
-	return nil, fmt.Errorf("下载 %s: 连续 %d 次 HTTP %d(403/503)被限流,已停止重试", u, maxDownloadAttempts, lastStatus)
+	return nil, fmt.Errorf("下载 %s: 连续 %d 次 HTTP %d(403/503)被限流,已停止重试", RedactURL(u), maxDownloadAttempts, lastStatus)
 }
 
 func (c *Client) waitBackoff(ctx context.Context, attempt int) error {
@@ -426,12 +485,12 @@ func (c *Client) rawGet(ctx context.Context, u string) ([]byte, int, string, err
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, 0, "", fmt.Errorf("httpx GET %s: %w", u, err)
+		return nil, 0, "", fmt.Errorf("httpx GET %s: %w", RedactURL(u), err)
 	}
 	defer resp.Body.Close()
 	body, err := readBody(resp, maxTorrentBody)
 	if err != nil {
-		return nil, resp.StatusCode, "", fmt.Errorf("httpx GET %s 读取失败: %w", u, err)
+		return nil, resp.StatusCode, "", fmt.Errorf("httpx GET %s 读取失败: %w", RedactURL(u), err)
 	}
 	return body, resp.StatusCode, resp.Header.Get("Content-Type"), nil
 }
@@ -453,7 +512,8 @@ func (c *Client) DownloadViaQB(ctx context.Context, item *RssItem, outPath strin
 	}
 
 	// before-hash:记录添加前 relay-pending 分类下已有的 hash,用于识别"新增"
-	// 种子,防止误取仍在 pending 分类里的旧种子。
+	// 种子,防止误取仍在 pending 分类里的旧种子。这些 hash 同时登记进共享注册
+	// 表,严格排除"其他 worker 的 before 快照"里的 hash,避免并发直拉串扰。
 	before := map[string]bool{}
 	if infos, err := inst.Info(ctx, ""); err == nil {
 		for _, t := range infos {
@@ -462,8 +522,9 @@ func (c *Client) DownloadViaQB(ctx context.Context, item *RssItem, outPath strin
 			}
 		}
 	}
+	registerPendingBefore(before)
 
-	add, err := inst.AddTorrentURL(ctx, u, qb.AddOptions{
+	added, err := inst.AddTorrentURL(ctx, u, qb.AddOptions{
 		Cookie:   c.Cookie,
 		Category: "relay-pending",
 		Paused:   true,
@@ -472,25 +533,23 @@ func (c *Client) DownloadViaQB(ctx context.Context, item *RssItem, outPath strin
 		return false, err
 	}
 
-	// qB 5.x 返回 {"added_torrent_ids":[...]};4.x 返回 "Ok."。
+	// qB 5.x 返回新增的 torrent id 列表;4.x 返回 "Ok."(added 为 nil)。
 	hash := ""
-	if ids, ok := add["added_torrent_ids"].([]any); ok {
-		for _, h := range ids {
-			if s, ok := h.(string); ok {
-				hash = s
-				break
-			}
-		}
+	if len(added) > 0 {
+		hash = added[0]
 	}
 
 	// qB 接受 URL 但 metadata 尚未解析时,轮询 relay-pending 直到出现新 hash。
+	// 严格过滤:仅接受 (a) 不在本任务 before 快照中、(b) 不在任何其他 worker
+	// before 快照中 的 hash,避免并发直拉时误取别的任务的种子。
 	if hash == "" {
 		deadline := time.Now().Add(30 * time.Second)
 		for time.Now().Before(deadline) {
 			var cands []string
 			if infos, err := inst.Info(ctx, ""); err == nil {
 				for _, t := range infos {
-					if t.Category == "relay-pending" && t.Hash != "" && !before[t.Hash] {
+					if t.Category == "relay-pending" && t.Hash != "" &&
+						!before[t.Hash] && !isForeignPending(t.Hash) {
 						cands = append(cands, t.Hash)
 					}
 				}
@@ -505,7 +564,7 @@ func (c *Client) DownloadViaQB(ctx context.Context, item *RssItem, outPath strin
 		}
 	}
 	if hash == "" {
-		return false, fmt.Errorf("qB 添加种子后未找到新增 hash(add 响应: %v)", add)
+		return false, fmt.Errorf("qB 添加种子后未找到新增 hash(add 响应: %v)", added)
 	}
 
 	// 轮询 export 直到 metadata 就绪(qB 尚未取到 .torrent 时 export 报错)。
@@ -523,10 +582,10 @@ func (c *Client) DownloadViaQB(ctx context.Context, item *RssItem, outPath strin
 	}
 	if len(data) == 0 {
 		_ = inst.Delete(ctx, hash, false)
-		return false, fmt.Errorf("qB 120s 内未取到 .torrent 元数据(hash=%s, url=%s)", hash, truncate(u, 90))
+		return false, fmt.Errorf("qB 120s 内未取到 .torrent 元数据(hash=%s, url=%s)", hash, RedactURL(u))
 	}
 
-	if err := os.WriteFile(outPath, data, 0o644); err != nil {
+	if err := os.WriteFile(outPath, data, 0o600); err != nil {
 		return false, err
 	}
 	_ = inst.Delete(ctx, hash, false)
@@ -544,6 +603,31 @@ func (c *Client) qbInstance() (*qb.Instance, error) {
 	}
 	c.qb = qb.NewInstance(c.qbHost, c.qbPort, c.qbUser, c.qbPass)
 	return c.qb, nil
+}
+
+// pendingBefore 是跨 Client 实例共享的 before-hash 注册表:每个 qB 直拉任务
+// 在开始前把 relay-pending 里已存在的 hash 登记进来,轮询识别"新增"时一并排除,
+// 从而严格避免并发直拉任务互相误取(串扰)。该表只增不减——一个曾存在于
+// pending 分类的 hash 永不应被后续任务当作"新增"。
+var (
+	pendingBeforeMu sync.Mutex
+	pendingBefore   = map[string]bool{}
+)
+
+func registerPendingBefore(hashes map[string]bool) {
+	pendingBeforeMu.Lock()
+	for h := range hashes {
+		if h != "" {
+			pendingBefore[strings.ToLower(h)] = true
+		}
+	}
+	pendingBeforeMu.Unlock()
+}
+
+func isForeignPending(hash string) bool {
+	pendingBeforeMu.Lock()
+	defer pendingBeforeMu.Unlock()
+	return pendingBefore[strings.ToLower(hash)]
 }
 
 // DetailFetcher 构造详情/文件列表抓取客户端(复用源站 base URL 和认证信息)。
@@ -568,11 +652,4 @@ func sleepCtx(ctx context.Context, d time.Duration) error {
 	case <-timer.C:
 		return nil
 	}
-}
-
-func truncate(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return s[:n]
 }

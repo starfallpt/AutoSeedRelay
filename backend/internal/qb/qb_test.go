@@ -56,9 +56,12 @@ type fakeQB struct {
 	startCalls   int
 	resumeCalls  int
 	exportCalls  int
+	deleteCalls  int
 
 	lastAddHadTorrents    bool
 	lastAddHadTorrentsSet bool
+	lastDeleteHashes      string
+	lastDeleteFiles       string
 }
 
 const torrentInfoJSON = `[{"hash":"abc123","name":"test.torrent","state":"uploading","progress":1,"completed":100,"completion_on":12345,"dlspeed":0,"upspeed":0,"size":100,"downloaded":100,"uploaded":200,"ratio":2.0,"added_on":1000,"category":"cat","save_path":"/downloads","num_complete":5,"num_leechs":0}]`
@@ -107,6 +110,8 @@ func (f *fakeQB) handler() http.HandlerFunc {
 			f.handleMaindata(w, r)
 		case "/api/v2/transfer/info":
 			f.handleTransfer(w, r)
+		case "/api/v2/torrents/delete":
+			f.handleDelete(w, r)
 		default:
 			http.NotFound(w, r)
 		}
@@ -305,6 +310,24 @@ func (f *fakeQB) handleTransfer(w http.ResponseWriter, r *http.Request) {
 	io.WriteString(w, `{"dl_info_speed":1,"up_info_speed":2,"dl_info_data":3,"up_info_data":4}`)
 }
 
+func (f *fakeQB) handleDelete(w http.ResponseWriter, r *http.Request) {
+	f.mu.Lock()
+	f.deleteCalls++
+	f.mu.Unlock()
+	if !f.authorize(w, r) {
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "bad form", http.StatusBadRequest)
+		return
+	}
+	f.mu.Lock()
+	f.lastDeleteHashes = r.PostFormValue("hashes")
+	f.lastDeleteFiles = r.PostFormValue("deleteFiles")
+	f.mu.Unlock()
+	w.WriteHeader(http.StatusOK)
+}
+
 // client builds an Instance pointed at the fake server with the given
 // password.
 func (f *fakeQB) client(t *testing.T, password string) *Instance {
@@ -394,15 +417,39 @@ func TestAddFails(t *testing.T) {
 	}
 }
 
-func TestAddJSON(t *testing.T) {
-	f := newFake(t, func(f *fakeQB) { f.addBody = `{"added":1}` })
+func TestAddURLReturnsAddedIDs(t *testing.T) {
+	f := newFake(t, func(f *fakeQB) { f.addBody = `{"added_torrent_ids":["aaa111","bbb222"]}` })
 	inst := f.client(t, "adminpass")
-	res, err := inst.AddMagnet(context.Background(), "magnet:?xt=urn:btih:abc", AddOptions{})
+	ids, err := inst.AddTorrentURL(context.Background(), "magnet:?xt=urn:btih:abc", AddOptions{})
+	if err != nil {
+		t.Fatalf("AddTorrentURL() error = %v, want nil", err)
+	}
+	if len(ids) != 2 || ids[0] != "aaa111" || ids[1] != "bbb222" {
+		t.Fatalf("AddTorrentURL() = %v, want [aaa111 bbb222]", ids)
+	}
+}
+
+func TestAddURLReturnsSingleID(t *testing.T) {
+	f := newFake(t, func(f *fakeQB) { f.addBody = `{"id":"ccc333"}` })
+	inst := f.client(t, "adminpass")
+	ids, err := inst.AddMagnet(context.Background(), "magnet:?xt=urn:btih:abc", AddOptions{})
 	if err != nil {
 		t.Fatalf("AddMagnet() error = %v, want nil", err)
 	}
-	if res["added"] != float64(1) {
-		t.Fatalf("AddMagnet() = %v, want added=1", res)
+	if len(ids) != 1 || ids[0] != "ccc333" {
+		t.Fatalf("AddMagnet() = %v, want [ccc333]", ids)
+	}
+}
+
+func TestAddURLNoIDsReturnsNil(t *testing.T) {
+	f := newFake(t, nil) // addBody defaults to "Ok." (qB4-style, no ids)
+	inst := f.client(t, "adminpass")
+	ids, err := inst.AddTorrentURL(context.Background(), "magnet:?xt=urn:btih:abc", AddOptions{})
+	if err != nil {
+		t.Fatalf("AddTorrentURL() error = %v, want nil", err)
+	}
+	if ids != nil {
+		t.Fatalf("AddTorrentURL() = %v, want nil (no ids reported)", ids)
 	}
 }
 
@@ -445,6 +492,39 @@ func TestReloginOn401(t *testing.T) {
 	}
 	if f.infoCalls != 2 {
 		t.Fatalf("infoCalls = %d, want 2 (401 + retry)", f.infoCalls)
+	}
+}
+
+func TestReloginFailureNoInfiniteRetry(t *testing.T) {
+	f := newFake(t, func(f *fakeQB) {
+		f.requireAuth = true
+		f.failNextProtected = 1
+	})
+	inst := f.client(t, "adminpass")
+
+	// Initial login succeeds and stores the SID.
+	if err := inst.Login(context.Background()); err != nil {
+		t.Fatalf("Login() error = %v, want nil", err)
+	}
+
+	// The password rotates after login, so the 401-triggered re-login fails.
+	f.mu.Lock()
+	f.password = "rotated-pass"
+	f.mu.Unlock()
+
+	if _, err := inst.GetTorrent(context.Background(), "abc123"); err == nil {
+		t.Fatal("GetTorrent() = nil, want auth error after failed re-login")
+	}
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	// One initial login + one re-login attempt = 2 total. The request must not
+	// keep retrying once re-login fails.
+	if f.loginCalls != 2 {
+		t.Fatalf("loginCalls = %d, want 2 (initial + one re-login attempt)", f.loginCalls)
+	}
+	if f.infoCalls != 1 {
+		t.Fatalf("infoCalls = %d, want 1 (single retry, no infinite loop)", f.infoCalls)
 	}
 }
 
@@ -569,6 +649,108 @@ func TestIsSlow(t *testing.T) {
 	}
 }
 
+func TestIsSlowConcurrent(t *testing.T) {
+	f := newFake(t, func(f *fakeQB) {
+		f.requireAuth = true
+		f.infoBody = `[{"hash":"slowc","name":"n","state":"downloading","dlspeed":0,"progress":0.1,"completed":0,"completion_on":-1}]`
+	})
+	inst := f.client(t, "adminpass")
+	ctx := context.Background()
+	if err := inst.Login(ctx); err != nil {
+		t.Fatalf("Login() error = %v, want nil", err)
+	}
+
+	var wg sync.WaitGroup
+	for i := 0; i < 50; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			// Concurrent calls on the same hash exercise the slowTracker
+			// read/modify/write path; -race (in CI) catches the old unlocked
+			// belowStart read, and this must not panic or corrupt the map.
+			_ = inst.IsSlow(ctx, "slowc", 10, time.Hour)
+		}()
+	}
+	wg.Wait()
+
+	inst.slowMu.Lock()
+	defer inst.slowMu.Unlock()
+	if len(inst.slowTracker) != 1 {
+		t.Fatalf("slowTracker size = %d, want 1 after concurrent IsSlow", len(inst.slowTracker))
+	}
+}
+
+func TestIsSlowPrunesIdleEntries(t *testing.T) {
+	f := newFake(t, func(f *fakeQB) {
+		f.requireAuth = true
+		f.infoBody = `[{"hash":"h","name":"n","state":"downloading","dlspeed":0,"progress":0.1,"completed":0,"completion_on":-1}]`
+	})
+	inst := f.client(t, "adminpass")
+
+	// Seed many idle entries directly (simulating hashes last seen >10m ago).
+	old := time.Now().Add(-11 * time.Minute)
+	inst.slowMu.Lock()
+	for i := 0; i < 100; i++ {
+		h := fmt.Sprintf("hash-%d", i)
+		inst.slowTracker[h] = &slowEntry{belowStart: old, lastSeen: old}
+	}
+	inst.slowMu.Unlock()
+
+	// One IsSlow call prunes the idle entries and keeps only the active hash.
+	_ = inst.IsSlow(context.Background(), "h", 10, time.Hour)
+
+	inst.slowMu.Lock()
+	defer inst.slowMu.Unlock()
+	if len(inst.slowTracker) != 1 {
+		t.Fatalf("slowTracker size = %d, want 1 after pruning idle entries", len(inst.slowTracker))
+	}
+	if _, ok := inst.slowTracker["h"]; !ok {
+		t.Fatal(`slowTracker missing active hash "h" after prune`)
+	}
+}
+
+func TestBuildBaseURL(t *testing.T) {
+	cases := []struct {
+		name string
+		host string
+		port string
+		want string
+	}{
+		{"ipv6 bare", "::1", "8080", "http://[::1]:8080"},
+		{"ipv6 with scheme", "http://::1", "8080", "http://[::1]:8080"},
+		{"ipv6 already bracketed", "http://[::1]", "8080", "http://[::1]:8080"},
+		{"ipv6 full literal", "http://[2001:db8::1]", "8080", "http://[2001:db8::1]:8080"},
+		{"ipv4", "http://127.0.0.1", "8080", "http://127.0.0.1:8080"},
+		{"domain", "http://example.com", "8080", "http://example.com:8080"},
+		{"domain no port", "example.com", "", "http://example.com"},
+		{"empty host default", "", "8080", "http://127.0.0.1:8080"},
+	}
+	for _, tc := range cases {
+		if got := buildBaseURL(tc.host, tc.port); got != tc.want {
+			t.Errorf("%s: buildBaseURL(%q, %q) = %q, want %q", tc.name, tc.host, tc.port, got, tc.want)
+		}
+	}
+}
+
+func TestDelete(t *testing.T) {
+	f := newFake(t, func(f *fakeQB) { f.requireAuth = true })
+	inst := f.client(t, "adminpass")
+	if err := inst.Delete(context.Background(), "abc123|def456", true); err != nil {
+		t.Fatalf("Delete() error = %v, want nil", err)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.deleteCalls != 1 {
+		t.Fatalf("deleteCalls = %d, want 1", f.deleteCalls)
+	}
+	if f.lastDeleteHashes != "abc123|def456" {
+		t.Fatalf("delete hashes = %q, want %q", f.lastDeleteHashes, "abc123|def456")
+	}
+	if f.lastDeleteFiles != "true" {
+		t.Fatalf("deleteFiles = %q, want %q", f.lastDeleteFiles, "true")
+	}
+}
+
 func TestManagerCRUD(t *testing.T) {
 	m := NewManager()
 	if _, ok := m.Get("a"); ok {
@@ -650,4 +832,26 @@ func closedPortURL(t *testing.T) (scheme, host, port string) {
 		t.Fatalf("SplitHostPort: %v", err)
 	}
 	return "http", host, port
+}
+
+func TestReadLimitedExceeds(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(make([]byte, 2048)) // 2KB > 1KB limit
+	}))
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if _, err := readLimited(resp, 1024); err == nil {
+		t.Fatal("readLimited() = nil, want limit-exceeded error")
+	} else {
+		var mbe *http.MaxBytesError
+		if !errors.As(err, &mbe) {
+			t.Fatalf("readLimited() error = %T %v, want *http.MaxBytesError", err, err)
+		}
+	}
 }

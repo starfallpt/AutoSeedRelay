@@ -7,6 +7,7 @@ package notifier
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -161,7 +162,7 @@ func doRequest(ctx context.Context, client *http.Client, req *http.Request) ([]b
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, fmt.Errorf("notifier: %s returned %s: %s",
-			req.URL.Redacted(), resp.Status, strings.TrimSpace(string(body)))
+			req.URL.Host, resp.Status, strings.TrimSpace(string(body)))
 	}
 	return body, nil
 }
@@ -368,9 +369,62 @@ func (s *smtpNotifier) Send(ctx context.Context, msg Message) error {
 	if s.user != "" {
 		auth = smtp.PlainAuth("", s.user, s.pass, s.host)
 	}
-	// smtp.SendMail has no context variant; the caller's ctx is only used for
-	// cancellation upstream.
-	return smtp.SendMail(addr, auth, s.from, s.to, content)
+
+	// stdlib smtp.SendMail dials with net.Dial (no timeout) and has no context
+	// variant, so an unreachable/black-holed SMTP host can hang this goroutine
+	// forever. Dial ourselves with an explicit 10s timeout, then drive the same
+	// transaction SendMail would (EHLO → STARTTLS if offered → AUTH → MAIL/RCPT/
+	// DATA → QUIT). The caller's ctx is honoured for the dial; stdlib smtp has
+	// no context-aware verbs for the subsequent commands, so an already-stuck
+	// command cannot be aborted by ctx.
+	dialer := &net.Dialer{Timeout: 10 * time.Second}
+	conn, err := dialer.DialContext(ctx, "tcp", addr)
+	if err != nil {
+		return err
+	}
+
+	client, err := smtp.NewClient(conn, s.host)
+	if err != nil {
+		return err
+	}
+	defer client.Close()
+
+	if err := client.Hello("localhost"); err != nil {
+		return err
+	}
+	if ok, _ := client.Extension("STARTTLS"); ok {
+		if err := client.StartTLS(&tls.Config{ServerName: s.host}); err != nil {
+			return err
+		}
+	}
+	if auth != nil {
+		if ok, _ := client.Extension("AUTH"); !ok {
+			return errors.New("notifier: smtp: server doesn't support AUTH")
+		}
+		if err := client.Auth(auth); err != nil {
+			return err
+		}
+	}
+	if err := client.Mail(s.from); err != nil {
+		return err
+	}
+	for _, rcpt := range s.to {
+		if err := client.Rcpt(rcpt); err != nil {
+			return err
+		}
+	}
+	w, err := client.Data()
+	if err != nil {
+		return err
+	}
+	if _, err := w.Write(content); err != nil {
+		_ = w.Close()
+		return err
+	}
+	if err := w.Close(); err != nil {
+		return err
+	}
+	return client.Quit()
 }
 
 // buildSMTPMessage assembles a minimal RFC 5322 message. It is a plain function

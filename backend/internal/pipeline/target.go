@@ -2,7 +2,9 @@ package pipeline
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"regexp"
@@ -80,8 +82,9 @@ func siteConfigFromTarget(t *store.Target) (adapters.SiteConfig, error) {
 }
 
 // publishToOneTarget cleans the torrent for one target and publishes it,
-// handling duplicate → cross-seed and auth-expired → warning + mark-failed.
-// It returns nil on published or cross-seeded, otherwise a descriptive error.
+// handling the atomic claim (抢发), duplicate → cross-seed, and auth-expired →
+// warning + mark-failed. It returns nil on published or cross-seeded, otherwise
+// a descriptive error.
 func (p *RelayOne) publishToOneTarget(ctx context.Context, seed *store.Seed, src *store.Source, detail *source.SeedDetail, tor *parser.ParsedTorrent, t *store.Target) error {
 	cfg, err := siteConfigFromTarget(t)
 	if err != nil {
@@ -91,88 +94,88 @@ func (p *RelayOne) publishToOneTarget(ctx context.Context, seed *store.Seed, src
 	if err != nil {
 		return fmt.Errorf("build adapter: %w", err)
 	}
-
 	cleaned, err := parser.CleanTorrentForTarget(tor, adapter.Announce(), "["+src.Name+"]")
 	if err != nil {
 		return fmt.Errorf("clean torrent: %w", err)
 	}
 
+	// Claim or reuse the relay record. A finished record (already published /
+	// cross-seeded / retired) is filtered out by Relay before this point; this
+	// check is a defensive backstop.
+	existing, err := p.repo.GetRecord(ctx, seed.ID, t.ID)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	if existing != nil && doneRecordStatuses[existing.Status] {
+		return nil // already done
+	}
+
+	if existing == nil {
+		inserted, err := p.repo.UpsertRecord(ctx, &store.RelayRecord{
+			SeedID:   seed.ID,
+			TargetID: t.ID,
+			Role:     rolePublisher,
+			Status:   statusPending,
+		})
+		if err != nil {
+			return err
+		}
+		if !inserted {
+			// Another instance won the atomic claim → degrade to cross-seeder.
+			_ = p.repo.SetRecordRole(ctx, seed.ID, t.ID, roleSeeder)
+			return p.finishCrossSeed(ctx, seed, t, adapter, tor)
+		}
+	}
+
 	res, err := adapter.Publish(ctx, cleaned, buildPublishParams(seed, detail, tor, t))
 	if err == nil {
 		if !res.OK {
+			_ = p.repo.UpdateRecordAttempt(ctx, seed.ID, t.ID, statusFailed, source.RedactError(res.Detail))
 			return fmt.Errorf("publish reported not-ok: %s", res.Detail)
 		}
-		now := p.now().Unix()
-		if err := p.repo.UpsertRecord(ctx, &store.RelayRecord{
-			SeedID:          seed.ID,
-			TargetID:        t.ID,
-			Role:            rolePublisher,
-			Status:          statusPublished,
-			TargetTorrentID: strconv.FormatInt(res.TargetID, 10),
-			PublishedAt:     now,
-		}); err != nil {
-			return err
-		}
-		_ = p.repo.AppendLog(ctx, "info", "published",
-			fmt.Sprintf("seed %d -> %s target_id=%d", seed.ID, t.Name, res.TargetID))
+		_ = p.repo.UpdateRecordStatus(ctx, seed.ID, t.ID, statusPublished, "")
+		_ = p.repo.AppendLogSeed(ctx, seed.ID, "info", "published",
+			fmt.Sprintf("published to %s target_id=%d", t.Name, res.TargetID))
 		p.notify(ctx, notifier.LevelInfo, "发布成功",
 			fmt.Sprintf("seed %d 发布到 %s (target_id=%d)", seed.ID, t.Name, res.TargetID))
 		return nil
 	}
 
 	if adapters.IsDuplicate(err) {
-		if cerr := p.crossSeed(ctx, seed, t, adapter, tor); cerr != nil {
-			_ = p.recordFailure(ctx, seed.ID, t.ID, roleSeeder, cerr.Error())
-			return fmt.Errorf("cross-seed: %w", cerr)
-		}
-		now := p.now().Unix()
-		if err := p.repo.UpsertRecord(ctx, &store.RelayRecord{
-			SeedID:      seed.ID,
-			TargetID:    t.ID,
-			Role:        roleSeeder,
-			Status:      statusCrossSeeded,
-			PublishedAt: now,
-		}); err != nil {
-			return err
-		}
-		_ = p.repo.AppendLog(ctx, "info", "cross_seeding",
-			fmt.Sprintf("seed %d -> %s (duplicate)", seed.ID, t.Name))
-		p.notify(ctx, notifier.LevelInfo, "交叉辅种",
-			fmt.Sprintf("seed %d 在 %s 已存在，已交叉辅种", seed.ID, t.Name))
-		return nil
+		_ = p.repo.SetRecordRole(ctx, seed.ID, t.ID, roleSeeder)
+		return p.finishCrossSeed(ctx, seed, t, adapter, tor)
 	}
 
 	if adapters.IsAuthExpired(err) {
-		_ = p.recordFailure(ctx, seed.ID, t.ID, rolePublisher, err.Error())
-		_ = p.repo.AppendLog(ctx, "warning", "auth_expired",
-			fmt.Sprintf("seed %d -> %s: %v", seed.ID, t.Name, err))
+		_ = p.repo.UpdateRecordAttempt(ctx, seed.ID, t.ID, statusFailed, source.RedactError(err.Error()))
+		_ = p.repo.AppendLogSeed(ctx, seed.ID, "warning", "auth_expired",
+			fmt.Sprintf("%s: %s", t.Name, source.RedactError(err.Error())))
 		p.notify(ctx, notifier.LevelWarning, "目标站鉴权过期",
-			fmt.Sprintf("seed %d -> %s: %v", seed.ID, t.Name, err))
+			fmt.Sprintf("seed %d -> %s: %s", seed.ID, t.Name, source.RedactError(err.Error())))
 		return fmt.Errorf("auth expired: %w", err)
 	}
 
 	// category mismatch / transport / any other error.
-	_ = p.recordFailure(ctx, seed.ID, t.ID, rolePublisher, err.Error())
-	_ = p.repo.AppendLog(ctx, "warning", "publish_failed",
-		fmt.Sprintf("seed %d -> %s: %v", seed.ID, t.Name, err))
+	_ = p.repo.UpdateRecordAttempt(ctx, seed.ID, t.ID, statusFailed, source.RedactError(err.Error()))
+	_ = p.repo.AppendLogSeed(ctx, seed.ID, "warning", "publish_failed",
+		fmt.Sprintf("%s: %s", t.Name, source.RedactError(err.Error())))
 	return err
 }
 
-// recordFailure upserts a failed relay record, preserving/incrementing the
-// attempt count across retries.
-func (p *RelayOne) recordFailure(ctx context.Context, seedID, targetID int64, role, errMsg string) error {
-	rec := &store.RelayRecord{
-		SeedID:    seedID,
-		TargetID:  targetID,
-		Role:      role,
-		Status:    statusFailed,
-		Attempts:  1,
-		LastError: errMsg,
+// finishCrossSeed runs the cross-seed join and records the outcome
+// (cross_seeding on success, failed on error). It is shared by the
+// duplicate-detected and the lost-claim paths.
+func (p *RelayOne) finishCrossSeed(ctx context.Context, seed *store.Seed, t *store.Target, adapter adapters.Adapter, tor *parser.ParsedTorrent) error {
+	if cerr := p.crossSeed(ctx, seed, t, adapter, tor); cerr != nil {
+		_ = p.repo.UpdateRecordAttempt(ctx, seed.ID, t.ID, statusFailed, source.RedactError(cerr.Error()))
+		return fmt.Errorf("cross-seed: %w", cerr)
 	}
-	if existing, err := p.repo.GetRecord(ctx, seedID, targetID); err == nil {
-		rec.Attempts = existing.Attempts + 1
-	}
-	return p.repo.UpsertRecord(ctx, rec)
+	_ = p.repo.UpdateRecordStatus(ctx, seed.ID, t.ID, statusCrossSeeded, "")
+	_ = p.repo.AppendLogSeed(ctx, seed.ID, "info", "cross_seeding",
+		fmt.Sprintf("cross-seeded to %s (duplicate)", t.Name))
+	p.notify(ctx, notifier.LevelInfo, "交叉辅种",
+		fmt.Sprintf("seed %d 在 %s 已存在，已交叉辅种", seed.ID, t.Name))
+	return nil
 }
 
 // crossSeed joins the target's existing swarm (BIZ-SPEC §4): it re-announces
@@ -181,7 +184,7 @@ func (p *RelayOne) recordFailure(ctx context.Context, seedID, targetID int64, ro
 // back to a normal (re-checking) add on failure. It records the cross replica
 // so the engine can retire it later.
 func (p *RelayOne) crossSeed(ctx context.Context, seed *store.Seed, t *store.Target, adapter adapters.Adapter, tor *parser.ParsedTorrent) error {
-	inst, qbID := p.pickQB(ctx, seed)
+	inst, qbID := p.selectQB(ctx, p.originQBName(ctx, seed))
 	if inst == nil {
 		return fmt.Errorf("no qB instance available for cross-seed")
 	}

@@ -155,6 +155,52 @@ func TestBreakerHalfOpenProbeFailureReopens(t *testing.T) {
 	}
 }
 
+// TestBreakerConcurrentFnOutsideLock proves fn() is not serialized under the
+// breaker lock: all n calls must enter fn concurrently. If Do still held the
+// lock during fn(), the first goroutine would block on release while every
+// other goroutine blocks on the mutex, and the timeout below would fire.
+func TestBreakerConcurrentFnOutsideLock(t *testing.T) {
+	b := NewBreaker()
+	const n = 32
+	entered := make(chan struct{}, n)
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	doRelease := func() { releaseOnce.Do(func() { close(release) }) }
+	defer doRelease()
+
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_ = b.Do(func() error {
+				entered <- struct{}{}
+				<-release
+				return nil
+			})
+		}()
+	}
+
+	done := make(chan struct{})
+	go func() {
+		for i := 0; i < n; i++ {
+			<-entered
+		}
+		doRelease()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Do() held the lock during fn(): calls did not run concurrently")
+	}
+	wg.Wait()
+	if got := b.State(); got != "closed" {
+		t.Fatalf("state = %q, want closed", got)
+	}
+}
+
 // --- router ---
 
 func TestRouterCriticalImmediate(t *testing.T) {
@@ -280,8 +326,38 @@ func TestAllOffline(t *testing.T) {
 	}
 }
 
-// --- providers (httptest fake endpoints) ---
+// TestRouterStartIdempotentAndStop verifies Start is idempotent (a second
+// call does not launch another flusher) and Stop cancels and waits for the
+// flusher goroutine.
+func TestRouterStartIdempotentAndStop(t *testing.T) {
+	n := &recordingNotifier{}
+	r := NewRouter()
+	r.Add("inst", n, LevelWarning)
 
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	r.Start(ctx, time.Millisecond)
+	r.Start(ctx, time.Millisecond) // idempotent: must not double-open
+
+	r.mu.Lock()
+	started := r.started
+	r.mu.Unlock()
+	if !started {
+		t.Fatal("router not marked started after Start")
+	}
+
+	r.Stop() // waits for the flusher goroutine to exit
+
+	r.mu.Lock()
+	started = r.started
+	r.mu.Unlock()
+	if started {
+		t.Fatal("router still marked started after Stop")
+	}
+}
+
+// --- providers (httptest fake endpoints) ---
 func TestWebhookProvider(t *testing.T) {
 	type captured struct {
 		title, body, level, auth string

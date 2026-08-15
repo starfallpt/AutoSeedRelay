@@ -38,6 +38,9 @@ func (r *Repo) GetEnabledQBInstances(ctx context.Context) ([]*QBInstance, error)
 	for rows.Next() {
 		q, err := r.scanQB(rows)
 		if err != nil {
+			if warnBadCredential(err) {
+				continue
+			}
 			return nil, err
 		}
 		out = append(out, q)

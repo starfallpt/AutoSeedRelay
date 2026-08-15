@@ -231,3 +231,21 @@ func TestRestoreRejectsNewerDBVersion(t *testing.T) {
 		t.Fatal("expected error for too-new relay.db user_version, got nil")
 	}
 }
+
+func TestWriteZipFileRejectsOversizedEntry(t *testing.T) {
+	// Forge an entry whose declared uncompressed size exceeds the cap, without
+	// allocating a real multi-hundred-MB file.
+	f := &zip.File{}
+	f.Name = dbFileName
+	f.UncompressedSize64 = maxDBBytes + 1
+
+	dst, err := os.Create(filepath.Join(t.TempDir(), "out.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dst.Close()
+
+	if err := writeZipFile(f, dst); err == nil {
+		t.Fatal("writeZipFile() = nil, want oversized-entry error")
+	}
+}

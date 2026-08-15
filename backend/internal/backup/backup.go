@@ -42,7 +42,14 @@ const (
 	metaFileName = "meta.json"
 	// maxMetaSize caps meta.json to guard against zip bombs in a restore path.
 	maxMetaSize = 1 << 20 // 1 MiB
+	// maxDBBytes caps the decompressed relay.db entry (defense against a forged
+	// zip header declaring a small size but decompressing much larger).
+	maxDBBytes = 512 << 20 // 512 MiB
 )
+
+// MaxBackupBytes caps the total size of a restore archive uploaded to Restore.
+// Exported as a variable so callers can adjust it per deployment.
+var MaxBackupBytes int64 = 512 << 20 // 512 MiB
 
 // AppVersion is the backend release version recorded in backup metadata.
 //
@@ -128,10 +135,14 @@ func Restore(ctx context.Context, dbPath string, r io.Reader) error {
 		return errors.New("backup: nil reader")
 	}
 
-	// zip.Reader needs random access, so buffer the whole archive.
-	data, err := io.ReadAll(r)
+	// zip.Reader needs random access, so buffer the whole archive. Cap the read
+	// at MaxBackupBytes so a huge upload cannot exhaust memory.
+	data, err := io.ReadAll(io.LimitReader(r, MaxBackupBytes+1))
 	if err != nil {
 		return fmt.Errorf("backup: read archive: %w", err)
+	}
+	if int64(len(data)) > MaxBackupBytes {
+		return fmt.Errorf("backup: archive exceeds %d bytes", MaxBackupBytes)
 	}
 	zr, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
 	if err != nil {
@@ -387,13 +398,23 @@ func readZipJSON(f *zip.File, v any) error {
 }
 
 func writeZipFile(f *zip.File, dst *os.File) error {
+	// Reject an entry whose declared uncompressed size already exceeds the cap
+	// (fail fast, no allocation). The LimitReader below is the second line of
+	// defense for a forged header that lies about its size.
+	if f.UncompressedSize64 > maxDBBytes {
+		return fmt.Errorf("backup: %s is too large (%d bytes)", f.Name, f.UncompressedSize64)
+	}
 	rc, err := f.Open()
 	if err != nil {
 		return fmt.Errorf("backup: open %s: %w", f.Name, err)
 	}
 	defer rc.Close()
-	if _, err := io.Copy(dst, rc); err != nil {
+	n, err := io.Copy(dst, io.LimitReader(rc, maxDBBytes+1))
+	if err != nil {
 		return fmt.Errorf("backup: extract %s: %w", f.Name, err)
+	}
+	if n > maxDBBytes {
+		return fmt.Errorf("backup: %s expands beyond %d bytes", f.Name, maxDBBytes)
 	}
 	return nil
 }
@@ -404,7 +425,9 @@ func copyFile(src, dst string) (err error) {
 		return err
 	}
 	defer in.Close()
-	out, err := os.Create(dst)
+	// The auto-backup copy contains credentials; create it 0600 so it is not
+	// world-readable.
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
 		return err
 	}

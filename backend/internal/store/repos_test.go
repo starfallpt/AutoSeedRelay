@@ -207,6 +207,27 @@ func TestCredentialDecryptFailureReturnsError(t *testing.T) {
 	}
 }
 
+func TestListSkipsUndecryptableRow(t *testing.T) {
+	repo, _ := newTestRepo(t)
+	if err := repo.UpsertSource(ctx, &Source{Name: "good", Role: "source", Status: "active"}); err != nil {
+		t.Fatal(err)
+	}
+	// A second active row with a corrupted ciphertext: the list must skip it
+	// (slog.Warn) instead of failing the whole table.
+	if _, err := repo.DB().Exec(
+		`INSERT INTO sources (name, role, status, enc_passkey) VALUES ('bad','source','active','!!!not-base64!!!')`); err != nil {
+		t.Fatalf("insert bad row: %v", err)
+	}
+
+	active, err := repo.GetActiveSources(ctx)
+	if err != nil {
+		t.Fatalf("GetActiveSources must not fail on one undecryptable row: %v", err)
+	}
+	if len(active) != 1 || active[0].Name != "good" {
+		t.Fatalf("active sources = %+v, want only 'good'", active)
+	}
+}
+
 func TestTargetCRUDAndEnabledFilter(t *testing.T) {
 	repo, _ := newTestRepo(t)
 	tgt := &Target{
@@ -346,8 +367,12 @@ func TestRelayRecordCRUD(t *testing.T) {
 	}
 
 	rec := &RelayRecord{SeedID: sd.ID, TargetID: tgt.ID, Role: "publisher", Status: "pending"}
-	if err := repo.UpsertRecord(ctx, rec); err != nil {
+	inserted, err := repo.UpsertRecord(ctx, rec)
+	if err != nil {
 		t.Fatalf("UpsertRecord: %v", err)
+	}
+	if !inserted {
+		t.Fatal("expected first UpsertRecord to insert")
 	}
 	if rec.ID == 0 {
 		t.Fatal("expected record id")
@@ -376,12 +401,14 @@ func TestRelayRecordCRUD(t *testing.T) {
 		t.Fatalf("retire mismatch: %+v", got)
 	}
 
-	// Upsert on the same (seed, target) is idempotent.
-	if err := repo.UpsertRecord(ctx, rec); err != nil {
+	// Upsert on the same (seed, target) is now an atomic no-op claim: the row
+	// is already claimed, so inserted=false and no duplicate is created.
+	inserted, err = repo.UpsertRecord(ctx, rec)
+	if err != nil {
 		t.Fatalf("UpsertRecord again: %v", err)
 	}
-	if rec.ID != got.ID {
-		t.Fatalf("upsert id = %d, want %d", rec.ID, got.ID)
+	if inserted {
+		t.Fatal("expected second UpsertRecord to report inserted=false on conflict")
 	}
 	if n := rawCount(t, repo, `SELECT count(*) FROM relay_records WHERE seed_id=? AND target_id=?`, sd.ID, tgt.ID); n != 1 {
 		t.Fatalf("relay row count = %d, want 1", n)

@@ -19,6 +19,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // RssItem RSS 单条种子的解析结果。
@@ -200,19 +201,26 @@ func ParseRSS(xmlBytes []byte) ([]RssItem, error) {
 	return items, nil
 }
 
-// FetchRSS 抓取并解析指定 URL 的 RSS。请求前做 SSRF 校验,响应体限制 10MB。
+// FetchRSS 抓取并解析指定 URL 的 RSS。请求前做 SSRF 校验,响应体限制 10MB,
+// 重定向逐跳复检 SSRF,客户端超时 30s(替代无超时的 http.DefaultClient)。
 func FetchRSS(ctx context.Context, urlStr string, client *http.Client) ([]RssItem, error) {
 	if err := safeURL(urlStr); err != nil {
 		return nil, err
 	}
 	if client == nil {
-		client = http.DefaultClient
+		client = &http.Client{Timeout: 30 * time.Second}
+	}
+	// 复制一份再覆盖 CheckRedirect/Timeout,避免改动调用方共享的 client。
+	c := *client
+	c.CheckRedirect = safeRedirectCheck(nil)
+	if c.Timeout == 0 {
+		c.Timeout = 30 * time.Second
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, urlStr, nil)
 	if err != nil {
 		return nil, fmt.Errorf("构造 RSS 请求失败: %w", err)
 	}
-	resp, err := client.Do(req)
+	resp, err := c.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("RSS 抓取失败: %w", err)
 	}

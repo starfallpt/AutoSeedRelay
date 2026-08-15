@@ -45,6 +45,9 @@ func (r *Repo) CreateSeed(ctx context.Context, s *Seed) (int64, error) {
 	if s == nil {
 		return 0, fmt.Errorf("store: create seed: nil seed")
 	}
+	if err := validateSeedStatus(s.Status); err != nil {
+		return 0, fmt.Errorf("store: create seed: %w", err)
+	}
 	res, err := r.db.ExecContext(ctx, `
 		INSERT INTO seeds
 			(source_site, info_hash, title, size, category, promotion,
@@ -80,6 +83,9 @@ func (r *Repo) CreateSeed(ctx context.Context, s *Seed) (int64, error) {
 
 // UpdateSeedStatus sets a seed's status and error text.
 func (r *Repo) UpdateSeedStatus(ctx context.Context, id int64, status, errMsg string) error {
+	if err := validateSeedStatus(status); err != nil {
+		return fmt.Errorf("store: update seed %d status: %w", id, err)
+	}
 	_, err := r.db.ExecContext(ctx, `
 		UPDATE seeds SET status = ?, error = ?, updated_at = unixepoch() WHERE id = ?`, status, errMsg, id)
 	if err != nil {

@@ -43,6 +43,9 @@ func (r *Repo) GetEnabledTargets(ctx context.Context) ([]*Target, error) {
 	for rows.Next() {
 		t, err := r.scanTarget(rows)
 		if err != nil {
+			if warnBadCredential(err) {
+				continue
+			}
 			return nil, err
 		}
 		out = append(out, t)

@@ -88,7 +88,9 @@ func (e *Engine) observeHealth(ctx context.Context, statuses []qb.Status) {
 
 // monitorInstance reconciles one qB instance's torrents against the seeds and
 // replicas: it maintains origin replica rows with live progress and evaluates
-// retire conditions for completed seeds.
+// retire conditions for completed seeds. Ownership is replica-based
+// (replica.info_hash × qb_id); a hash-only fallback handles historical seeds
+// that predate the replica rows, and only when the hash is unambiguous.
 func (e *Engine) monitorInstance(ctx context.Context, qi *store.QBInstance, torrents []*qb.TorrentInfo) {
 	byHash := make(map[string]*qb.TorrentInfo, len(torrents))
 	for _, t := range torrents {
@@ -98,13 +100,63 @@ func (e *Engine) monitorInstance(ctx context.Context, qi *store.QBInstance, torr
 		byHash[strings.ToLower(t.Hash)] = t
 	}
 
+	replicas, err := e.repo.ListReplicasByQB(ctx, qi.ID)
+	if err != nil {
+		e.log.Error("monitor: list replicas by qb", "qb", qi.Name, "error", err)
+		return
+	}
+
+	processed := make(map[int64]bool, len(replicas))
+	for _, rep := range replicas {
+		sd, err := e.repo.GetSeedByID(ctx, rep.SeedID)
+		if err != nil {
+			continue // orphan replica
+		}
+		t, ok := byHash[strings.ToLower(rep.InfoHash)]
+		if !ok {
+			continue // torrent no longer on this qB
+		}
+		if rep.Progress != t.Progress {
+			if err := e.repo.UpdateReplicaProgress(ctx, rep.ID, t.Progress); err != nil {
+				e.log.Warn("monitor: update replica progress", "replica_id", rep.ID, "error", err)
+			}
+		}
+		if !processed[sd.ID] {
+			processed[sd.ID] = true
+			e.retireCheck(ctx, sd, qi, t)
+		}
+	}
+
+	e.fallbackHashMatch(ctx, qi, byHash, processed)
+}
+
+// fallbackHashMatch reconciles seeding seeds that have no replica on this qB
+// (historical data) by info_hash. It only acts when exactly one seed maps to a
+// hash; a hash shared by multiple seeds is ambiguous and is skipped (never
+// retired) with a warning.
+func (e *Engine) fallbackHashMatch(ctx context.Context, qi *store.QBInstance, byHash map[string]*qb.TorrentInfo, processed map[int64]bool) {
 	seeds := e.seedingSeeds(ctx)
 
+	bySeedHash := map[string][]*store.Seed{}
 	for _, sd := range seeds {
-		t, ok := byHash[strings.ToLower(sd.InfoHash)]
-		if !ok {
-			continue // this instance is not hosting the source torrent
+		if processed[sd.ID] {
+			continue
 		}
+		h := strings.ToLower(sd.InfoHash)
+		bySeedHash[h] = append(bySeedHash[h], sd)
+	}
+
+	for h, sds := range bySeedHash {
+		t, ok := byHash[h]
+		if !ok {
+			continue
+		}
+		if len(sds) != 1 {
+			e.log.Warn("monitor: hash matches multiple seeds on qb; skip retire",
+				"qb", qi.Name, "hash", h, "seeds", len(sds))
+			continue
+		}
+		sd := sds[0]
 		e.ensureOriginReplica(ctx, sd, qi, t)
 		e.retireCheck(ctx, sd, qi, t)
 	}

@@ -39,6 +39,30 @@ func (r *Repo) ListReplicas(ctx context.Context, seedID int64) ([]*Replica, erro
 	return out, nil
 }
 
+// ListReplicasByQB returns every replica living on a qB instance, ordered by
+// id. The monitor uses it to reconcile seed↔torrent ownership per qB instance
+// (replica.info_hash × qb_id) instead of matching every seeding seed by hash.
+func (r *Repo) ListReplicasByQB(ctx context.Context, qbID int64) ([]*Replica, error) {
+	rows, err := r.db.QueryContext(ctx, `SELECT `+replicaColumns+` FROM seed_replicas WHERE qb_id = ? ORDER BY id`, qbID)
+	if err != nil {
+		return nil, fmt.Errorf("store: list replicas by qb: %w", err)
+	}
+	defer rows.Close()
+
+	var out []*Replica
+	for rows.Next() {
+		rep, err := r.scanReplica(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, rep)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: list replicas by qb: %w", err)
+	}
+	return out, nil
+}
+
 // UpsertReplica inserts or updates the replica keyed by UNIQUE
 // (seed_id, qb_id, role), assigning the row id back to rep.ID.
 func (r *Repo) UpsertReplica(ctx context.Context, rep *Replica) error {

@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -213,9 +212,9 @@ func (m *MTeam) requestJSON(ctx context.Context, url, method string) (map[string
 		return nil, err
 	}
 	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
+	body, err := readLimited(resp.Body, maxResponseBody)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("mteam endpoint %s: %w", url, err)
 	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("mteam endpoint %s: HTTP %d", url, resp.StatusCode)

@@ -2,11 +2,14 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/autoseedrelay/relay/internal/notifier"
+	"github.com/autoseedrelay/relay/internal/source"
 )
 
 // retryBackoffs is the fixed exponential backoff schedule between retries
@@ -180,9 +183,20 @@ func (e *Engine) rebuildRetryQueue(ctx context.Context) {
 	}
 }
 
+// partialFailure is the structural shape of pipeline.PartialFailure. The engine
+// detects it with errors.As so it never imports the pipeline package.
+type partialFailure interface {
+	error
+	IsPartial() bool
+	FailedNames() []string
+}
+
 // submitJob runs one pipeline attempt (retryNo == 0 is the initial attempt,
 // 1..RetryMax are retries) and routes failures into the retry queue or, once
-// RetryMax is exceeded, into the failed state with a critical notification.
+// RetryMax is exceeded, into the terminal state with a critical notification.
+// A partial failure (some targets succeeded) is retryable; on exhaustion the
+// seed is kept in "seeding" (preserving the successes) and only the failed
+// targets are listed in the critical notification.
 func (e *Engine) submitJob(ctx context.Context, seedID int64, retryNo int) {
 	if e.pl == nil {
 		e.log.Warn("pipeline not wired; seed left pending", "seed_id", seedID)
@@ -195,6 +209,9 @@ func (e *Engine) submitJob(ctx context.Context, seedID int64, retryNo int) {
 		return
 	}
 
+	var pf partialFailure
+	isPartial := errors.As(err, &pf) && pf.IsPartial()
+
 	st := e.strategy(ctx)
 	maxRetries := int(st.RetryMax)
 	if maxRetries <= 0 {
@@ -206,19 +223,33 @@ func (e *Engine) submitJob(ctx context.Context, seedID int64, retryNo int) {
 	}
 
 	next := retryNo + 1
+	// 统一脱敏:进入 seeds.error / 通知 / slog 的错误串必须剥离凭据(如 passkey)。
+	errMsg := source.RedactError(err.Error())
 	if next <= maxRetries {
-		if serr := e.repo.UpdateSeedStatus(ctx, seedID, "retry", err.Error()); serr != nil {
+		if serr := e.repo.UpdateSeedStatus(ctx, seedID, "retry", errMsg); serr != nil {
 			e.log.Warn("retry: mark seed retry", "seed_id", seedID, "error", serr)
 		}
 		e.retry.Enqueue(seedID, next)
-		e.log.Warn("retry: scheduled", "seed_id", seedID, "retry_no", next, "error", err)
+		e.log.Warn("retry: scheduled", "seed_id", seedID, "retry_no", next, "error", errMsg)
 		return
 	}
 
-	if ferr := e.repo.UpdateSeedStatus(ctx, seedID, "failed", err.Error()); ferr != nil {
+	if isPartial {
+		// Partial failure exhausted: keep the successful targets (seed stays
+		// "seeding") and surface only the failed targets critically.
+		if ferr := e.repo.UpdateSeedStatus(ctx, seedID, "seeding", errMsg); ferr != nil {
+			e.log.Warn("retry: mark seed seeding (partial)", "seed_id", seedID, "error", ferr)
+		}
+		e.notify(ctx, notifier.LevelCritical, "部分目标重试耗尽",
+			fmt.Sprintf("seed_id=%d 重试 %d 次后仍有目标失败(已保留成功目标): %s", seedID, maxRetries, strings.Join(pf.FailedNames(), "; ")))
+		e.log.Error("retry: partial exhausted", "seed_id", seedID, "retries", maxRetries, "error", errMsg)
+		return
+	}
+
+	if ferr := e.repo.UpdateSeedStatus(ctx, seedID, "failed", errMsg); ferr != nil {
 		e.log.Warn("retry: mark seed failed", "seed_id", seedID, "error", ferr)
 	}
 	e.notify(ctx, notifier.LevelCritical, "种子重试耗尽",
-		fmt.Sprintf("seed_id=%d 重试 %d 次仍失败,已进入失败队列待手动重试: %s", seedID, maxRetries, err.Error()))
-	e.log.Error("retry: exhausted", "seed_id", seedID, "retries", maxRetries, "error", err)
+		fmt.Sprintf("seed_id=%d 重试 %d 次仍失败,已进入失败队列待手动重试: %s", seedID, maxRetries, errMsg))
+	e.log.Error("retry: exhausted", "seed_id", seedID, "retries", maxRetries, "error", errMsg)
 }

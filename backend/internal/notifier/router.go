@@ -48,6 +48,11 @@ type Router struct {
 	window    time.Duration
 	now       func() time.Time
 	pending   map[string]*aggregate
+
+	// flusher lifecycle (Start/Stop).
+	wg      sync.WaitGroup
+	started bool
+	cancel  context.CancelFunc
 }
 
 // RouterOption configures a Router.
@@ -125,24 +130,63 @@ func (r *Router) Flush(ctx context.Context) {
 	}
 }
 
-// Start runs a background flusher until ctx is cancelled. interval defaults to
-// half the aggregation window.
+// Start runs a background flusher until Stop is called (or ctx is cancelled).
+// interval defaults to half the aggregation window. Start is idempotent: a
+// second call while the flusher is already running is a no-op. The flusher
+// goroutine is tracked in the router's WaitGroup; Stop cancels it and waits
+// for it to exit.
 func (r *Router) Start(ctx context.Context, interval time.Duration) {
 	if interval <= 0 {
 		interval = r.window / 2
 	}
+
+	r.mu.Lock()
+	if r.started {
+		r.mu.Unlock()
+		return
+	}
+	r.started = true
+	fctx, cancel := context.WithCancel(ctx)
+	r.cancel = cancel
+	r.wg.Add(1)
+	r.mu.Unlock()
+
 	go func() {
+		defer r.wg.Done()
 		t := time.NewTicker(interval)
 		defer t.Stop()
 		for {
 			select {
-			case <-ctx.Done():
+			case <-fctx.Done():
 				return
 			case <-t.C:
-				r.flushExpired(ctx)
+				r.flushExpired(fctx)
 			}
 		}
 	}()
+}
+
+// Stop cancels the flusher goroutine (if any) and waits for it to exit. It is
+// safe to call when Start was never called, and after Stop a subsequent Start
+// launches a fresh flusher.
+func (r *Router) Stop() {
+	r.mu.Lock()
+	if !r.started {
+		r.mu.Unlock()
+		return
+	}
+	cancel := r.cancel
+	r.mu.Unlock()
+
+	if cancel != nil {
+		cancel()
+	}
+	r.wg.Wait()
+
+	r.mu.Lock()
+	r.started = false
+	r.cancel = nil
+	r.mu.Unlock()
 }
 
 func (r *Router) dispatch(ctx context.Context, level Level, msg Message) error {

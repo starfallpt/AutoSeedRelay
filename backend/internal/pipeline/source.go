@@ -44,7 +44,7 @@ type sourceProvider struct {
 	httpClient *http.Client
 	urllCheck  func(string) error
 	backoff    source.BackoffFunc
-	qb         func() *qb.Instance
+	qb         func(ctx context.Context) *qb.Instance
 	fetchRSS   func(ctx context.Context, url string, client *http.Client) ([]source.RssItem, error)
 	detail     *source.DetailFetcher
 }
@@ -52,7 +52,7 @@ type sourceProvider struct {
 // NewSourceProvider builds a SourceProvider from a source row. pickQB supplies
 // the qB instance used for the preferred direct-pull download (may be nil, in
 // which case Download always uses the direct HTTP path).
-func NewSourceProvider(src *store.Source, pickQB func() *qb.Instance, cfg SourceConfig) SourceProvider {
+func NewSourceProvider(src *store.Source, pickQB func(ctx context.Context) *qb.Instance, cfg SourceConfig) SourceProvider {
 	fetchRSS := cfg.FetchRSS
 	if fetchRSS == nil {
 		fetchRSS = source.FetchRSS
@@ -107,7 +107,7 @@ func (s *sourceProvider) FetchDetail(ctx context.Context, torrentID int) (*sourc
 func (s *sourceProvider) Download(ctx context.Context, item *source.RssItem, outPath string) error {
 	var qbErr error
 	if s.qb != nil {
-		if inst := s.qb(); inst != nil {
+		if inst := s.qb(ctx); inst != nil {
 			_, qbErr = s.client("qb", inst).DownloadTorrent(ctx, item, outPath)
 			if qbErr == nil {
 				return nil

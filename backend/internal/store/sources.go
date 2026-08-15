@@ -42,6 +42,9 @@ func (r *Repo) GetActiveSources(ctx context.Context) ([]*Source, error) {
 	for rows.Next() {
 		src, err := r.scanSource(rows)
 		if err != nil {
+			if warnBadCredential(err) {
+				continue
+			}
 			return nil, err
 		}
 		out = append(out, src)

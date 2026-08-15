@@ -207,6 +207,63 @@ func ParseIMDB(htmlStr string) string {
 	return ""
 }
 
+// promotionAliases 把促销的各种原始拼写(详情页"促销"行文本、促销图片 class)
+// 归一化成规范 token(BIZ-SPEC §6:free / 2x_free / 2x / 50% / 30% / neutral)。
+// 层级精确匹配:"free" 不会误命中 "2x_free"。
+var promotionAliases = map[string]string{
+	// free
+	"free": "free", "免费": "free", "pro_free": "free", "freeleech": "free",
+	// 2x free
+	"2x_free": "2x_free", "2xfree": "2x_free", "2x免费": "2x_free",
+	"free2x": "2x_free", "pro_free2up": "2x_free", "pro_2xfree": "2x_free",
+	// 2x upload
+	"2x": "2x", "2x上传": "2x", "double_upload": "2x", "pro_2up": "2x",
+	// 50% down
+	"50%": "50%", "50%down": "50%", "pro_50pctdown": "50%", "50pctdown": "50%",
+	// 30% down
+	"30%": "30%", "30%down": "30%", "pro_30pctdown": "30%", "30pctdown": "30%",
+	// neutral
+	"neutral": "neutral", "普通": "neutral", "pro_neutral": "neutral",
+}
+
+// promoClassOrder 是促销图片 class 的探测顺序(先更具体,避免 "pro_free" 子串
+// 误命中 "pro_free2up")。
+var promoClassOrder = []string{
+	"pro_free2up", "pro_2xfree", "pro_2x_free",
+	"pro_2up", "pro_2x",
+	"pro_free",
+	"pro_50pctdown", "pro_50",
+	"pro_30pctdown", "pro_30",
+	"pro_neutral",
+}
+
+// NormalizePromotion 把原始促销标记归一化成规范 token;未知/空返回 ""。
+func NormalizePromotion(raw string) string {
+	raw = strings.ToLower(strings.TrimSpace(raw))
+	if raw == "" {
+		return ""
+	}
+	if tok, ok := promotionAliases[raw]; ok {
+		return tok
+	}
+	return ""
+}
+
+// ParsePromotion 从详情页提取促销标记:优先"促销"行文本,回退到促销图片 class。
+func ParsePromotion(htmlStr string) string {
+	if v, ok := rowValue(htmlStr, "促销"); ok {
+		if s := stripTags(v); s != "" {
+			return s
+		}
+	}
+	for _, class := range promoClassOrder {
+		if strings.Contains(htmlStr, class) {
+			return class
+		}
+	}
+	return ""
+}
+
 // DetailFetcher 详情/文件列表抓取客户端(HTML 正则 + API 两条路径)。
 type DetailFetcher struct {
 	BaseURL  string
@@ -396,5 +453,6 @@ func (f *DetailFetcher) fetchDetailHTML(ctx context.Context, torrentID int) (*Se
 		IMDb:       ParseIMDB(detail),
 		DescrHTML:  detail,
 		Files:      entries,
+		Promotion:  ParsePromotion(detail),
 	}, nil
 }

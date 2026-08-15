@@ -66,9 +66,10 @@ type Engine struct {
 	log   *slog.Logger
 
 	// lifecycle
-	running atomic.Bool
-	cancel  context.CancelFunc
-	wg      sync.WaitGroup
+	running     atomic.Bool
+	cancel      context.CancelFunc
+	wg          sync.WaitGroup
+	lifecycleMu sync.Mutex // serializes Start/Stop
 
 	// worker pool: seed ids waiting for a pipeline run.
 	jobs chan int64
@@ -110,7 +111,7 @@ func New(cfg Config, repo *store.Repo, pl Pipeline, qbMgr *qb.Manager, notif *no
 		pollState: make(map[int64]*sourceState),
 		now:       time.Now,
 		backoff:   source.DefaultBackoff,
-		httpClient: http.DefaultClient,
+		httpClient: &http.Client{Timeout: 30 * time.Second},
 		fetchRSS:  source.FetchRSS,
 	}
 	e.dispatcher = NewDispatcher(repo, qbMgr)
@@ -152,6 +153,12 @@ func (e *Engine) SetFetchRSS(fn func(ctx context.Context, url string, client *ht
 // Dispatcher exposes the qB selection strategy to callers (e.g. the pipeline).
 func (e *Engine) Dispatcher() *Dispatcher { return e.dispatcher }
 
+// SetPipeline replaces the pipeline after New, so main can build the engine
+// first (to obtain its dispatcher) and then inject the concrete pipeline that
+// depends on that dispatcher. It must be called before Start; calling it after
+// Start races the worker pool's reads of the pipeline.
+func (e *Engine) SetPipeline(pl Pipeline) { e.pl = pl }
+
 // SelectQB is a convenience passthrough to the embedded Dispatcher.
 func (e *Engine) SelectQB(ctx context.Context, opts DispatchOpts) (string, error) {
 	return e.dispatcher.SelectQB(ctx, opts)
@@ -173,10 +180,21 @@ func (e *Engine) Status() map[string]any {
 // Start begins the background loops. It rebuilds the retry queue from the DB,
 // launches the worker pool and the four loops, and returns once they are
 // running. ctx is the parent lifetime; Stop cancels the derived context.
+// Start/Stop are serialized by lifecycleMu; the jobs channel is rebuilt on
+// every Start (old buffered jobs are discarded).
 func (e *Engine) Start(ctx context.Context) error {
-	if !e.running.CompareAndSwap(false, true) {
+	e.lifecycleMu.Lock()
+	defer e.lifecycleMu.Unlock()
+
+	if e.running.Load() {
 		return errAlreadyRunning
 	}
+	e.running.Store(true)
+
+	// Rebuild the jobs channel so stale buffered ids from a previous run are
+	// dropped rather than replayed into the new worker pool.
+	e.jobs = make(chan int64, e.cfg.Workers)
+
 	ectx, cancel := context.WithCancel(ctx)
 	e.cancel = cancel
 
@@ -208,9 +226,14 @@ func (e *Engine) Start(ctx context.Context) error {
 }
 
 // Stop gracefully shuts the engine down: cancels the derived context, flushes
-// pending notifications, and waits for all tracked goroutines to return.
+// pending notifications, and waits for all tracked goroutines to return. The
+// running flag is cleared only after wg.Wait() returns, so a concurrent Start
+// during shutdown is still refused; Start/Stop are serialized by lifecycleMu.
 func (e *Engine) Stop(ctx context.Context) error {
-	if !e.running.CompareAndSwap(true, false) {
+	e.lifecycleMu.Lock()
+	defer e.lifecycleMu.Unlock()
+
+	if !e.running.Load() {
 		return nil
 	}
 	if e.cancel != nil {
@@ -218,8 +241,10 @@ func (e *Engine) Stop(ctx context.Context) error {
 	}
 	if e.notif != nil {
 		e.notif.Flush(ctx)
+		e.notif.Stop()
 	}
 	e.wg.Wait()
+	e.running.Store(false)
 	e.log.Info("engine stopped")
 	return nil
 }

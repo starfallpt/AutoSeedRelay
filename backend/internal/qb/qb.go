@@ -28,6 +28,7 @@ import (
 	"fmt"
 	"io"
 	"mime/multipart"
+	"net"
 	"net/http"
 	"net/http/cookiejar"
 	"net/textproto"
@@ -157,6 +158,22 @@ func buildBaseURL(host, port string) string {
 	port = strings.TrimSpace(port)
 	if port == "" {
 		return host
+	}
+
+	// An IPv6 literal host (e.g. "::1", "http://::1") must be bracketed in the
+	// authority component before the port is appended, otherwise the result is
+	// ambiguous ("http://::1:8080" parses host "::1:8080"). IPv4 literals and
+	// DNS names are left untouched; an already-bracketed "[::1]" is reused as-is.
+	scheme := ""
+	rest := host
+	if i := strings.Index(host, "://"); i >= 0 {
+		scheme = host[:i+3]
+		rest = host[i+3:]
+	}
+	if !strings.HasPrefix(rest, "[") {
+		if ip := net.ParseIP(rest); ip != nil && ip.To4() == nil {
+			return scheme + "[" + rest + "]:" + port
+		}
 	}
 	return host + ":" + port
 }
@@ -378,6 +395,69 @@ func parseAddResponse(resp *http.Response) (map[string]any, error) {
 	return map[string]any{"status": text, "http": resp.StatusCode}, nil
 }
 
+// parseAddIDs consumes a torrents/add response and returns the newly-added
+// torrent hashes. qB5 returns an empty body or JSON (with added_torrent_ids /
+// id); qB4 returns "Ok." / "Fails.". A nil slice is returned when no ids are
+// present (this is not an error).
+func parseAddIDs(resp *http.Response) ([]string, error) {
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	text := strings.TrimSpace(string(body))
+
+	switch {
+	case resp.StatusCode == http.StatusOK && text == "Fails.":
+		return nil, reqErrf("qB 添加种子失败(返回 Fails.):可能种子已存在或非法")
+	case resp.StatusCode >= http.StatusBadRequest:
+		return nil, reqErrf("qB 添加种子失败(HTTP %d): %s", resp.StatusCode, truncate(text, 200))
+	}
+
+	if text == "Ok." || text == "" {
+		return nil, nil
+	}
+
+	var m map[string]any
+	if err := json.Unmarshal(body, &m); err != nil {
+		// Non-JSON body with no recognizable status: no ids to report.
+		return nil, nil
+	}
+	return extractAddedIDs(m), nil
+}
+
+// extractAddedIDs pulls newly-added torrent hashes out of a torrents/add JSON
+// response. qB 5.x reports them under "added_torrent_ids"; some deployments
+// report a single "id". Returns nil when neither field is present/parseable.
+func extractAddedIDs(m map[string]any) []string {
+	var ids []string
+	if raw, ok := m["added_torrent_ids"]; ok {
+		ids = append(ids, idsFromValue(raw)...)
+	}
+	if raw, ok := m["id"]; ok {
+		ids = append(ids, idsFromValue(raw)...)
+	}
+	return ids
+}
+
+// idsFromValue normalizes a JSON value that may hold a string, []string or
+// []any (the shape json.Unmarshal produces for arrays) into a []string.
+func idsFromValue(v any) []string {
+	switch x := v.(type) {
+	case []any:
+		out := make([]string, 0, len(x))
+		for _, e := range x {
+			if s, ok := e.(string); ok {
+				out = append(out, s)
+			}
+		}
+		return out
+	case []string:
+		return x
+	case string:
+		return []string{x}
+	default:
+		return nil
+	}
+}
+
 // AddOptions carries the optional form fields for torrents/add.
 type AddOptions struct {
 	Savepath     string
@@ -427,18 +507,25 @@ func (i *Instance) AddTorrentFile(ctx context.Context, filename string, data []b
 // AddTorrentURL lets qB download a .torrent from an http(s) link or a
 // magnet. opts.Cookie is the site login cookie sent along with qB's HTTP
 // download request (used to bypass a source-site WAF).
-func (i *Instance) AddTorrentURL(ctx context.Context, torrentURL string, opts AddOptions) (map[string]any, error) {
+//
+// It returns the hashes of the newly-added torrents. qB 5.x answers with a
+// JSON body whose "added_torrent_ids" field (or, on some deployments, "id")
+// lists them; qB 4.x answers "Ok." with no ids. When the response carries no
+// parseable ids the returned slice is nil — never an error — so callers must
+// treat nil as "no ids reported" and fall back to discovery (e.g. polling the
+// target category), not as a failure.
+func (i *Instance) AddTorrentURL(ctx context.Context, torrentURL string, opts AddOptions) ([]string, error) {
 	form := addForm(opts, true)
 	form.Set("urls", torrentURL)
 	resp, err := i.postForm(ctx, "/api/v2/torrents/add", form)
 	if err != nil {
 		return nil, err
 	}
-	return parseAddResponse(resp)
+	return parseAddIDs(resp)
 }
 
 // AddMagnet adds a magnet link to qB; identical to AddTorrentURL.
-func (i *Instance) AddMagnet(ctx context.Context, magnet string, opts AddOptions) (map[string]any, error) {
+func (i *Instance) AddMagnet(ctx context.Context, magnet string, opts AddOptions) ([]string, error) {
 	return i.AddTorrentURL(ctx, magnet, opts)
 }
 

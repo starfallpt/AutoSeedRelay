@@ -9,6 +9,7 @@ package store
 import (
 	"database/sql"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 
@@ -28,6 +29,18 @@ type Store struct {
 	db *sql.DB
 }
 
+// dsn builds the modernc SQLite data-source name for path. It encodes the path
+// (folding Windows separators to '/', percent-encoding characters that would
+// otherwise break URI parsing) and folds the per-connection PRAGMAs
+// busy_timeout / foreign_keys into _pragma query parameters so that every
+// freshly-opened connection carries them, not just the one current connection.
+// journal_mode is deliberately NOT folded in here: it is database-scoped and is
+// set once, explicitly, after Open (see Open).
+func dsn(path string) string {
+	u := &url.URL{Scheme: "file", Path: filepath.ToSlash(path)}
+	return "file:" + u.EscapedPath() + "?_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)"
+}
+
 // Open opens (creating parent directories and the file as needed) the SQLite
 // database at path, configures WAL / busy-timeout / foreign-keys, applies any
 // pending migrations, and verifies connectivity with a Ping.
@@ -41,7 +54,7 @@ func Open(path string) (*Store, error) {
 		}
 	}
 
-	db, err := sql.Open(DriverName, path)
+	db, err := sql.Open(DriverName, dsn(path))
 	if err != nil {
 		return nil, fmt.Errorf("store: open sqlite: %w", err)
 	}
@@ -49,15 +62,13 @@ func Open(path string) (*Store, error) {
 	// writes (SQLite permits a single writer anyway).
 	db.SetMaxOpenConns(1)
 
-	for _, pragma := range []string{
-		"PRAGMA journal_mode=WAL",
-		"PRAGMA busy_timeout=5000",
-		"PRAGMA foreign_keys=ON",
-	} {
-		if _, err := db.Exec(pragma); err != nil {
-			db.Close()
-			return nil, fmt.Errorf("store: %s: %w", pragma, err)
-		}
+	// journal_mode is database-scoped and sticky; set it once after opening.
+	// busy_timeout and foreign_keys are per-connection and are carried by the
+	// DSN (see dsn) so every connection — including any future replacement —
+	// gets them.
+	if _, err := db.Exec("PRAGMA journal_mode=WAL"); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("store: PRAGMA journal_mode=WAL: %w", err)
 	}
 
 	if err := migrateEmbedded(db); err != nil {

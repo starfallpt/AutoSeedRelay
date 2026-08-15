@@ -173,10 +173,20 @@ func postMultipart(ctx context.Context, client *http.Client, url string, headers
 	return client.Do(req)
 }
 
-// readBody reads and closes the response body.
+// maxResponseBody caps an outbound HTTP response body read by the adapters.
+const maxResponseBody = 20 << 20 // 20 MiB
+
+// readLimited reads r up to n bytes via http.MaxBytesReader, returning
+// *http.MaxBytesError when the body exceeds the limit.
+func readLimited(r io.ReadCloser, n int64) ([]byte, error) {
+	return io.ReadAll(http.MaxBytesReader(nil, r, n))
+}
+
+// readBody reads and closes the response body, capped at maxResponseBody so an
+// oversized (or malicious) target response cannot exhaust memory.
 func readBody(resp *http.Response) (string, error) {
 	defer resp.Body.Close()
-	b, err := io.ReadAll(resp.Body)
+	b, err := readLimited(resp.Body, maxResponseBody)
 	if err != nil {
 		return "", err
 	}

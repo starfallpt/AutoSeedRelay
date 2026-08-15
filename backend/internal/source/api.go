@@ -34,6 +34,8 @@ type SeedDetail struct {
 	AudioCodec   string      `json:"audiocodec"`
 	Resolution   string      `json:"resolution"`
 	Team         string      `json:"team"`
+	// Promotion 是种子的促销标记(HTML 详情页"促销"行解析结果,API 路径可能为空)。
+	Promotion string `json:"promotion"`
 }
 
 type apiTorrentResponse struct {
@@ -104,12 +106,20 @@ func NewAPIFetcher(baseURL string, token string, timeoutSeconds float64) *APIFet
 	if timeoutSeconds <= 0 {
 		timeoutSeconds = 30
 	}
-	return &APIFetcher{
+	a := &APIFetcher{
 		BaseURL:  baseURL,
 		APIToken: token,
 		client:   &http.Client{Timeout: time.Duration(timeoutSeconds * float64(time.Second))},
 		checkURL: safeURL,
 	}
+	// 重定向逐跳复检 SSRF:引用实例的 checkURL,以便测试可注入宽松校验。
+	a.client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if err := a.checkURL(req.URL.String()); err != nil {
+			return errf("拒绝跟随重定向到 %s: %v", RedactURL(req.URL.String()), err)
+		}
+		return nil
+	}
+	return a
 }
 
 // FetchDetailAPI 通过 API 获取种子详情。

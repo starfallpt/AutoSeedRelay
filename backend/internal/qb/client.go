@@ -12,6 +12,18 @@ import (
 	"github.com/autoseedrelay/relay/internal/bencode"
 )
 
+// 出站响应体读取上限:普通端点 20MB,qB torrents/info 列表 50MB。
+const (
+	maxBodyDefault = 20 << 20
+	maxInfoBody    = 50 << 20
+)
+
+// readLimited reads resp.Body capped at limit bytes, returning a clear
+// *http.MaxBytesError when the response exceeds the limit.
+func readLimited(resp *http.Response, limit int64) ([]byte, error) {
+	return io.ReadAll(http.MaxBytesReader(nil, resp.Body, limit))
+}
+
 // completedSeedingStates is the set of qB states meaning "fully downloaded
 // and actively seeding".
 var completedSeedingStates = map[string]bool{
@@ -20,10 +32,15 @@ var completedSeedingStates = map[string]bool{
 	"stoppedUP": true,
 }
 
+// slowEntryIdle is how long a slowTracker entry may sit untouched before
+// IsSlow prunes it. This keeps the per-hash map bounded when hashes churn.
+const slowEntryIdle = 10 * time.Minute
+
 // slowEntry tracks how long a torrent's download speed has been below the
 // threshold, used by IsSlow.
 type slowEntry struct {
-	belowStart time.Time
+	belowStart time.Time // when the hash first fell below the threshold
+	lastSeen   time.Time // last IsSlow/reset touch, used for idle pruning
 }
 
 // TorrentInfo is a typed representation of a qB torrent, carrying the
@@ -81,7 +98,10 @@ func (i *Instance) torrentsInfo(ctx context.Context, params url.Values) ([]*Torr
 		return nil, err
 	}
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
+	body, err := readLimited(resp, maxInfoBody)
+	if err != nil {
+		return nil, reqErrf("info 响应体超限(>50MB): %v", err)
+	}
 	text := truncate(string(body), 200)
 	if resp.StatusCode == http.StatusForbidden {
 		return nil, reqErrf("info 被拒(HTTP 403): %s", text)
@@ -122,7 +142,10 @@ func (i *Instance) ExportTorrent(ctx context.Context, hash string) ([]byte, erro
 		return nil, err
 	}
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
+	body, err := readLimited(resp, maxBodyDefault)
+	if err != nil {
+		return nil, reqErrf("导出失败: 响应体超限: %v", err)
+	}
 	text := truncate(string(body), 200)
 	if resp.StatusCode == http.StatusNotFound {
 		return nil, reqErrf("导出失败(HTTP 404):hash %s 未找到或元数据缺失(has_metadata=false)", hash)
@@ -153,7 +176,10 @@ func (i *Instance) GetDiskSpace(ctx context.Context) (*DiskInfo, error) {
 		return nil, err
 	}
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
+	body, err := readLimited(resp, maxBodyDefault)
+	if err != nil {
+		return nil, reqErrf("获取磁盘空间失败: 响应体超限: %v", err)
+	}
 	text := truncate(string(body), 200)
 	if resp.StatusCode != http.StatusOK {
 		return nil, reqErrf("获取磁盘空间失败(HTTP %d): %s", resp.StatusCode, text)
@@ -177,7 +203,10 @@ func (i *Instance) GetTransferInfo(ctx context.Context) (*TransferInfo, error) {
 		return nil, err
 	}
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
+	body, err := readLimited(resp, maxBodyDefault)
+	if err != nil {
+		return nil, reqErrf("获取传输信息失败: 响应体超限: %v", err)
+	}
 	text := truncate(string(body), 200)
 	if resp.StatusCode != http.StatusOK {
 		return nil, reqErrf("获取传输信息失败(HTTP %d): %s", resp.StatusCode, text)
@@ -203,6 +232,11 @@ func IsCompletedSeeding(t *TorrentInfo) bool {
 // thresholdKBps for at least duration. It uses internal per-hash state (a
 // sliding "slow since" timer), so callers should invoke it periodically.
 // API or state errors are treated as "not slow" (returns false).
+//
+// Every call also prunes slowTracker entries idle for longer than
+// slowEntryIdle, keeping the map bounded as hashes churn. All read/modify/
+// write of slowTracker happens under slowMu, so belowStart is never read
+// outside the lock (fixes the IsSlow data race).
 func (i *Instance) IsSlow(ctx context.Context, hash string, thresholdKBps int, duration time.Duration) bool {
 	info, err := i.GetTorrent(ctx, hash)
 	if err != nil || info == nil {
@@ -217,25 +251,41 @@ func (i *Instance) IsSlow(ctx context.Context, hash string, thresholdKBps int, d
 		i.resetSlowTimer(hash)
 		return false
 	}
+
+	now := time.Now()
 	i.slowMu.Lock()
+	defer i.slowMu.Unlock()
+
+	i.pruneSlowTrackerLocked(now)
+
 	e, ok := i.slowTracker[hash]
-	if !ok || e.belowStart.IsZero() {
-		if !ok {
-			e = &slowEntry{}
-			i.slowTracker[hash] = e
-		}
-		e.belowStart = time.Now()
-		i.slowMu.Unlock()
+	if !ok {
+		i.slowTracker[hash] = &slowEntry{belowStart: now, lastSeen: now}
 		return false
 	}
-	i.slowMu.Unlock()
-	return time.Since(e.belowStart) >= duration
+	e.lastSeen = now
+	if e.belowStart.IsZero() {
+		e.belowStart = now
+		return false
+	}
+	return now.Sub(e.belowStart) >= duration
 }
 
 func (i *Instance) resetSlowTimer(hash string) {
 	i.slowMu.Lock()
+	defer i.slowMu.Unlock()
 	if e, ok := i.slowTracker[hash]; ok {
 		e.belowStart = time.Time{}
+		e.lastSeen = time.Now()
 	}
-	i.slowMu.Unlock()
+}
+
+// pruneSlowTrackerLocked drops slowTracker entries whose lastSeen is older
+// than slowEntryIdle. Caller must hold slowMu.
+func (i *Instance) pruneSlowTrackerLocked(now time.Time) {
+	for h, e := range i.slowTracker {
+		if now.Sub(e.lastSeen) > slowEntryIdle {
+			delete(i.slowTracker, h)
+		}
+	}
 }

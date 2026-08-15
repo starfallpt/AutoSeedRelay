@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -12,7 +13,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/autoseedrelay/relay/internal/adapters"
 	"github.com/autoseedrelay/relay/internal/bencode"
+	"github.com/autoseedrelay/relay/internal/engine"
 	"github.com/autoseedrelay/relay/internal/notifier"
 	"github.com/autoseedrelay/relay/internal/parser"
 	"github.com/autoseedrelay/relay/internal/qb"
@@ -106,6 +109,7 @@ type fakeSource struct {
 	torrent    []byte
 	infoHash   string
 	detailFail bool
+	promotion  string
 }
 
 func newFakeSource(t *testing.T, torrent []byte, infoHash string) *fakeSource {
@@ -130,9 +134,14 @@ func newFakeSource(t *testing.T, torrent []byte, infoHash string) *fakeSource {
 			http.Error(w, "boom", http.StatusInternalServerError)
 			return
 		}
+		promoRow := ""
+		if fs.promotion != "" {
+			promoRow = fmt.Sprintf(`<tr><td class="rowhead">促销</td><td class="rowfollow">%s</td></tr>`, fs.promotion)
+		}
 		_, _ = w.Write([]byte(`<table>
 <tr><td class="rowhead">副标题</td><td class="rowfollow">测试副标题</td></tr>
 <tr><td class="rowhead">标签</td><td class="rowfollow"><span>国语</span><span>中字</span></td></tr>
+` + promoRow + `
 </table>
 <small>IMDb tt1234567</small>`))
 	})
@@ -544,13 +553,23 @@ func TestRelayOneTargetFailsOtherSucceeds(t *testing.T) {
 	failTgt := insertTarget(t, repo, &store.Target{Name: "fail", Type: "mteam", Version: "api", BaseURL: failSrv.URL, CategoryOverrides: `{"movie":5}`, Status: "active"})
 
 	p := newTestPipeline(repo, qb.NewManager(), nil, permissiveSourceFactory(), nil)
-	if err := p.Relay(context.Background(), seed.ID); err != nil {
-		t.Fatalf("Relay: %v", err)
+	err := p.Relay(context.Background(), seed.ID)
+	var pf *PartialFailure
+	if !errors.As(err, &pf) {
+		t.Fatalf("Relay error = %v, want *PartialFailure", err)
+	}
+	if pf.SeedID != seed.ID {
+		t.Fatalf("PartialFailure.SeedID = %d, want %d", pf.SeedID, seed.ID)
+	}
+	if len(pf.Failed) != 1 || pf.Failed[0].TargetName != "fail" {
+		t.Fatalf("PartialFailure.Failed = %+v, want exactly [fail]", pf.Failed)
 	}
 
+	// The engine's retry owns the terminal transition; a partial failure must
+	// not yet mark the seed seeding.
 	got, _ := repo.GetSeedByID(context.Background(), seed.ID)
-	if got.Status != statusRelayed {
-		t.Fatalf("seed status = %q, want seeding", got.Status)
+	if got.Status == statusRelayed {
+		t.Fatalf("seed status = %q, want NOT seeding yet (partial failure pending retry)", got.Status)
 	}
 
 	okRec, _ := repo.GetRecord(context.Background(), seed.ID, okTgt.ID)
@@ -627,5 +646,181 @@ func TestSiteConfigFromTargetTagsMap(t *testing.T) {
 	}
 	if len(cfg.TagsMap) != 0 {
 		t.Fatalf("TagsMap = %+v, want empty on parse failure", cfg.TagsMap)
+	}
+}
+
+// failingAdapter returns a fixed error from Publish, so tests can drive the
+// failure path without a live target site.
+type failingAdapter struct{ err error }
+
+func (failingAdapter) Name() string { return "fake" }
+func (failingAdapter) Type() string { return "fake" }
+func (failingAdapter) Announce() string { return "http://t/announce.php" }
+func (failingAdapter) Probe(context.Context) (adapters.ProbeResult, error) {
+	return adapters.ProbeResult{}, nil
+}
+func (f failingAdapter) Publish(context.Context, *parser.ParsedTorrent, adapters.PublishParams) (adapters.PublishResult, error) {
+	return adapters.PublishResult{}, f.err
+}
+
+func TestRecordFailureRedactsCredential(t *testing.T) {
+	repo := newRepo(t)
+	raw, infoHash := buildTorrent(t, "Test.Movie.2026.mkv")
+	fs := newFakeSource(t, raw, infoHash)
+	src := insertSource(t, repo, fs.srv.URL)
+	seed := insertSeed(t, repo, src.ID, infoHash, "Test.Movie.2026.2160p.WEB-DL.HEVC.DDP")
+	tgt := insertTarget(t, repo, &store.Target{
+		Name: "t1", Type: "nexusphp", Version: "api", BaseURL: "http://t1",
+		AnnounceURL: "http://t1/announce.php?passkey={passkey}", Passkey: "p1",
+		CategoryOverrides: `{"movie":401}`, Status: "active",
+	})
+
+	const secret = "super-secret-target-passkey"
+	p := New(Deps{
+		Repo:   repo,
+		QB:     qb.NewManager(),
+		Source: permissiveSourceFactory(),
+		Adapters: func(cfg adapters.SiteConfig) (adapters.Adapter, error) {
+			return failingAdapter{err: errors.New("upload https://target.example/upload.php?passkey=" + secret + " failed")}, nil
+		},
+		MaxTargetConcurrency: 4,
+		CrossSeedTimeout:     50 * time.Millisecond,
+		CrossSeedInterval:    2 * time.Millisecond,
+	})
+
+	_ = p.Relay(context.Background(), seed.ID)
+
+	rec, err := repo.GetRecord(context.Background(), seed.ID, tgt.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec == nil {
+		t.Fatal("expected a failure record")
+	}
+	if strings.Contains(rec.LastError, secret) {
+		t.Fatalf("last_error leaks passkey: %q", rec.LastError)
+	}
+	if !strings.Contains(rec.LastError, "?[redacted]") {
+		t.Fatalf("last_error should carry redacted marker: %q", rec.LastError)
+	}
+
+	var detail string
+	if err := repo.DB().QueryRow(
+		`SELECT detail FROM activity_log WHERE action='publish_failed' ORDER BY id DESC LIMIT 1`).Scan(&detail); err != nil {
+		t.Fatalf("query activity_log: %v", err)
+	}
+	if strings.Contains(detail, secret) {
+		t.Fatalf("activity_log leaks passkey: %q", detail)
+	}
+}
+
+// --- promotion filter + QBSelector tests ---
+
+func TestRelayPromotionFilterSkip(t *testing.T) {
+	repo := newRepo(t)
+	raw, infoHash := buildTorrent(t, "Test.Movie.2026.mkv")
+	fs := newFakeSource(t, raw, infoHash)
+	fs.promotion = "2x" // not in the whitelist below
+
+	st, err := repo.GetStrategy(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.Promotions = `["free"]`
+	if err := repo.UpdateStrategy(context.Background(), st); err != nil {
+		t.Fatal(err)
+	}
+
+	src := insertSource(t, repo, fs.srv.URL)
+	seed := insertSeed(t, repo, src.ID, infoHash, "Test.Movie.2026.2160p.WEB-DL.HEVC.DDP")
+	insertTarget(t, repo, &store.Target{
+		Name: "t1", Type: "nexusphp", Version: "api", BaseURL: "http://unused",
+		AnnounceURL: "http://unused/announce.php?passkey={passkey}", Passkey: "p", APIToken: "tok",
+		Status: "active",
+	})
+
+	p := newTestPipeline(repo, qb.NewManager(), nil, permissiveSourceFactory(), nil)
+	if err := p.Relay(context.Background(), seed.ID); err != nil {
+		t.Fatalf("Relay: %v", err)
+	}
+
+	got, err := repo.GetSeedByID(context.Background(), seed.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != "skipped" {
+		t.Fatalf("seed status = %q, want skipped (promotion not in whitelist)", got.Status)
+	}
+
+	var n int
+	if err := repo.DB().QueryRow(`SELECT count(*) FROM relay_records WHERE seed_id=?`, seed.ID).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatalf("relay records = %d, want 0 (never reached publish)", n)
+	}
+}
+
+func TestPromotionFilterPass(t *testing.T) {
+	repo := newRepo(t)
+	st, err := repo.GetStrategy(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.Promotions = `["free"]`
+	if err := repo.UpdateStrategy(context.Background(), st); err != nil {
+		t.Fatal(err)
+	}
+
+	p := New(Deps{Repo: repo})
+	skip, err := p.checkPromotionFilter(context.Background(), &store.Seed{ID: 1}, &source.SeedDetail{Promotion: "免费"})
+	if err != nil {
+		t.Fatalf("checkPromotionFilter: %v", err)
+	}
+	if skip {
+		t.Fatal("checkPromotionFilter skipped an allowed promotion (免费 → free)")
+	}
+}
+
+type recordingSelector struct {
+	mu    sync.Mutex
+	calls int
+	last  engine.DispatchOpts
+	name  string
+	err   error
+}
+
+func (s *recordingSelector) SelectQB(_ context.Context, opts engine.DispatchOpts) (string, error) {
+	s.mu.Lock()
+	s.calls++
+	s.last = opts
+	s.mu.Unlock()
+	return s.name, s.err
+}
+
+func (s *recordingSelector) count() int { s.mu.Lock(); defer s.mu.Unlock(); return s.calls }
+func (s *recordingSelector) lastOpts() engine.DispatchOpts {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.last
+}
+
+func TestQBSelectorCalled(t *testing.T) {
+	repo := newRepo(t)
+	qbm := qb.NewManager()
+	qbm.Set("qbx", qb.NewInstance("http://127.0.0.1", "8080", "u", "p"))
+
+	sel := &recordingSelector{name: "qbx"}
+	p := New(Deps{Repo: repo, QB: qbm, QBSelector: sel})
+
+	inst, _ := p.selectQB(context.Background(), "origin-qb")
+	if inst == nil {
+		t.Fatal("selectQB returned nil instance")
+	}
+	if sel.count() != 1 {
+		t.Fatalf("SelectQB called %d times, want 1", sel.count())
+	}
+	if sel.lastOpts().PreferName != "origin-qb" {
+		t.Fatalf("PreferName = %q, want origin-qb", sel.lastOpts().PreferName)
 	}
 }

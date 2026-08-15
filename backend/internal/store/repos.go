@@ -3,7 +3,9 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
+	"log/slog"
 
 	"github.com/autoseedrelay/relay/internal/secret"
 )
@@ -48,16 +50,32 @@ func (r *Repo) encrypt(plaintext string) (any, error) {
 }
 
 // decrypt opens a ciphertext. Empty input (which is how SQL NULL is read back)
-// returns an empty plaintext without touching the crypto layer.
+// returns an empty plaintext without touching the crypto layer. A failure is
+// wrapped with ErrDecrypt so list helpers can skip the offending row instead of
+// failing the whole table.
 func (r *Repo) decrypt(enc string) (string, error) {
 	if enc == "" {
 		return "", nil
 	}
 	plain, err := secret.Decrypt(r.masterKey, enc)
 	if err != nil {
-		return "", fmt.Errorf("store: decrypt credential: %w", err)
+		return "", fmt.Errorf("%w: %v", ErrDecrypt, err)
 	}
 	return string(plain), nil
+}
+
+// ErrDecrypt marks a row whose credential cannot be decrypted (wrong master key
+// or corrupted ciphertext). List helpers treat it as "skip this row + warn".
+var ErrDecrypt = errors.New("store: credential decrypt failed")
+
+// warnBadCredential logs a warning and reports whether err is a decrypt failure
+// that should skip the current row rather than fail the whole listing.
+func warnBadCredential(err error) bool {
+	if errors.Is(err, ErrDecrypt) {
+		slog.Warn("store: skipping row with undecryptable credential", "error", err)
+		return true
+	}
+	return false
 }
 
 // decryptNull decrypts a nullable credential column, treating NULL as empty.

@@ -268,11 +268,12 @@ func LoadTorrent(path string) (map[string]any, error) {
 	return d, nil
 }
 
-// WriteTorrent encodes the torrent dict and writes it to path.
+// WriteTorrent encodes the torrent dict and writes it to path (0600, since
+// .torrent files may embed passkeys).
 func WriteTorrent(path string, torrent map[string]any) error {
 	enc, err := Encode(torrent)
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, enc, 0o644)
+	return os.WriteFile(path, enc, 0o600)
 }

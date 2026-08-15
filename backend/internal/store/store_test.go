@@ -19,8 +19,8 @@ func TestOpenMigrateIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("MigrateVersion: %v", err)
 	}
-	if ver != 2 {
-		t.Fatalf("expected schema version 2, got %d", ver)
+	if ver != 3 {
+		t.Fatalf("expected schema version 3, got %d", ver)
 	}
 
 	if err := s.Close(); err != nil {
@@ -36,8 +36,8 @@ func TestOpenMigrateIdempotent(t *testing.T) {
 
 	if ver, err := s2.MigrateVersion(); err != nil {
 		t.Fatalf("MigrateVersion after reopen: %v", err)
-	} else if ver != 2 {
-		t.Fatalf("expected schema version 2 after reopen, got %d", ver)
+	} else if ver != 3 {
+		t.Fatalf("expected schema version 3 after reopen, got %d", ver)
 	}
 
 	tables := []string{
@@ -78,5 +78,28 @@ func TestOpenMigrateIdempotent(t *testing.T) {
 	}
 	if n != 1 {
 		t.Fatalf("expected 1 strategies row, got %d", n)
+	}
+}
+
+func TestForeignKeysEnforcedByDSN(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "fk.db")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer s.Close()
+
+	// A relay_records row referencing a non-existent seed must be rejected:
+	// foreign_keys=1 must be in effect on the freshly-opened connection.
+	if _, err := s.db.Exec(
+		`INSERT INTO relay_records (seed_id, target_id) VALUES (1, 1)`); err == nil {
+		t.Fatal("expected FK violation inserting relay_records with unknown seed_id")
+	}
+	var n int
+	if err := s.db.QueryRow(`SELECT count(*) FROM relay_records`).Scan(&n); err != nil {
+		t.Fatalf("count relay_records: %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("relay_records rows = %d, want 0 (FK must block the insert)", n)
 	}
 }

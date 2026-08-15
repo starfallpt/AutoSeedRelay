@@ -3,8 +3,10 @@ package engine
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/autoseedrelay/relay/internal/notifier"
@@ -88,6 +90,15 @@ func (e *Engine) pollSource(ctx context.Context, src *store.Source) {
 // ingestItem dedups a single RSS item against the seeds table and, when new,
 // creates the seed and submits it to the pipeline worker pool.
 func (e *Engine) ingestItem(ctx context.Context, src *store.Source, item *source.RssItem) {
+	// Strategy filter (keywords + size) runs before dedup/create so filtered
+	// items never create a seed row. Promotion filtering happens later, in the
+	// pipeline (it needs the fetched detail).
+	if !itemMatchesStrategy(item, e.strategy(ctx)) {
+		e.log.Debug("poll: item filtered out by strategy",
+			"source", src.Name, "title", truncate(item.Title, 60))
+		return
+	}
+
 	ih := source.GuidToInfohash(item.GUID, item.Link, item.Title)
 
 	existing, err := e.repo.GetSeedByHash(ctx, src.Name, ih)
@@ -147,7 +158,7 @@ func (e *Engine) sourceFailed(ctx context.Context, src *store.Source, st *source
 	}
 
 	if fails >= maxSourceFailures {
-		reason := fmt.Sprintf("连续 %d 次 RSS 抓取失败(可能 cookie 过期): %v", fails, err)
+		reason := fmt.Sprintf("连续 %d 次 RSS 抓取失败(可能 cookie 过期): %s", fails, source.RedactError(err.Error()))
 		if perr := e.repo.PauseSource(ctx, src.ID, reason); perr != nil {
 			e.log.Error("poll: pause source", "source", src.Name, "error", perr)
 		}
@@ -166,7 +177,7 @@ func (e *Engine) sourceFailed(ctx context.Context, src *store.Source, st *source
 	e.pollMu.Unlock()
 
 	e.log.Warn("poll: source rss failed (will retry)",
-		"source", src.Name, "fails", fails, "next_allowed", st.nextAllowed, "error", err)
+		"source", src.Name, "fails", fails, "next_allowed", st.nextAllowed, "error", source.RedactError(err.Error()))
 }
 
 // sourceState returns (creating on first use) the poll state for a source id.
@@ -186,4 +197,52 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n]
+}
+
+// itemMatchesStrategy applies the strategy keyword + size filters to one RSS
+// item (BIZ-SPEC §2/§6). An empty keyword list accepts all; min/max size are
+// only enforced when the RSS item carries a known size.
+func itemMatchesStrategy(item *source.RssItem, st *store.Strategy) bool {
+	if item == nil || st == nil {
+		return true
+	}
+	if kws := parseJSONStringList(st.Keywords); len(kws) > 0 {
+		if !keywordHits(item.Title+"\n"+item.Description, kws) {
+			return false
+		}
+	}
+	if item.Size != nil {
+		if st.MinSize > 0 && *item.Size < st.MinSize {
+			return false
+		}
+		if st.MaxSize > 0 && *item.Size > st.MaxSize {
+			return false
+		}
+	}
+	return true
+}
+
+// keywordHits reports whether any keyword is a case-insensitive substring of
+// haystack.
+func keywordHits(haystack string, keywords []string) bool {
+	low := strings.ToLower(haystack)
+	for _, k := range keywords {
+		if k = strings.TrimSpace(k); k != "" && strings.Contains(low, strings.ToLower(k)) {
+			return true
+		}
+	}
+	return false
+}
+
+// parseJSONStringList decodes a JSON string-array column (keywords / promotions).
+func parseJSONStringList(raw string) []string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || raw == "[]" || raw == "null" {
+		return nil
+	}
+	var out []string
+	if err := json.Unmarshal([]byte(raw), &out); err != nil {
+		return nil
+	}
+	return out
 }

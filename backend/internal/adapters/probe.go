@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"html"
-	"io"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -54,7 +53,7 @@ func Probe(ctx context.Context, baseURL string, client *http.Client) (ProbeResul
 	sectionsURL := baseURL + "/api/v1/sections"
 	if resp, err := doProbeGet(ctx, c, sectionsURL); err == nil {
 		if resp.StatusCode == http.StatusOK {
-			body, _ := io.ReadAll(resp.Body)
+			body, _ := readLimited(resp.Body, maxResponseBody)
 			resp.Body.Close()
 			var sections map[string]any
 			if json.Unmarshal(body, &sections) == nil {
@@ -71,7 +70,7 @@ func Probe(ctx context.Context, baseURL string, client *http.Client) (ProbeResul
 	// 2) Classic NexusPHP form: upload.php with action="takeupload.php".
 	uploadPageURL := baseURL + "/upload.php"
 	if resp, err := doProbeGet(ctx, c, uploadPageURL); err == nil {
-		body, _ := io.ReadAll(resp.Body)
+		body, _ := readLimited(resp.Body, maxResponseBody)
 		resp.Body.Close()
 		bodyStr := string(body)
 		if resp.StatusCode == http.StatusOK && strings.Contains(bodyStr, "takeupload.php") {
@@ -86,7 +85,7 @@ func Probe(ctx context.Context, baseURL string, client *http.Client) (ProbeResul
 	// 3) M-Team Spring API: POST /torrent/categoryList returns JSON.
 	categoryListURL := baseURL + "/torrent/categoryList"
 	if resp, err := doProbePost(ctx, c, categoryListURL); err == nil {
-		body, _ := io.ReadAll(resp.Body)
+		body, _ := readLimited(resp.Body, maxResponseBody)
 		resp.Body.Close()
 		if resp.StatusCode == http.StatusOK && json.Valid(body) {
 			return mteamResult(baseURL, string(body)), nil
@@ -151,7 +150,7 @@ func probeNexusPHP(ctx context.Context, c *http.Client, baseURL string, headers 
 	if resp.StatusCode != http.StatusOK {
 		return ProbeResult{}, newAdapterError(nil, resp.StatusCode, "probe sections: HTTP "+strconv.Itoa(resp.StatusCode), "")
 	}
-	body, _ := io.ReadAll(resp.Body)
+	body, _ := readLimited(resp.Body, maxResponseBody)
 	var sections map[string]any
 	if err := json.Unmarshal(body, &sections); err != nil {
 		return ProbeResult{}, err
@@ -173,7 +172,7 @@ func probeClassic(ctx context.Context, c *http.Client, baseURL string, headers m
 		return ProbeResult{}, newAdapterError(nil, 0, "probe upload.php: "+err.Error(), err.Error())
 	}
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
+	body, _ := readLimited(resp.Body, maxResponseBody)
 	bodyStr := string(body)
 	if isClassicLoginRedirect(resp, bodyStr) {
 		return ProbeResult{Type: TypeNexusPHPClassic, BaseURL: baseURL, Auth: "cookie",
@@ -199,7 +198,7 @@ func probeMTeam(ctx context.Context, c *http.Client, baseURL string, headers map
 		return ProbeResult{}, newAdapterError(nil, 0, "probe categoryList: "+err.Error(), err.Error())
 	}
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
+	body, _ := readLimited(resp.Body, maxResponseBody)
 	if resp.StatusCode != http.StatusOK {
 		return ProbeResult{}, newAdapterError(nil, resp.StatusCode, "probe categoryList: HTTP "+strconv.Itoa(resp.StatusCode), "")
 	}
@@ -212,7 +211,7 @@ func probeMTeam(ctx context.Context, c *http.Client, baseURL string, headers map
 			req2.Header.Set(k, v)
 		}
 		if r2, err := c.Do(req2); err == nil {
-			b2, _ := io.ReadAll(r2.Body)
+			b2, _ := readLimited(r2.Body, maxResponseBody)
 			r2.Body.Close()
 			var data map[string]any
 			if json.Unmarshal(b2, &data) == nil {

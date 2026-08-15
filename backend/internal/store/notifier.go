@@ -40,6 +40,9 @@ func (r *Repo) GetNotifierInstances(ctx context.Context, enabledOnly bool) ([]*N
 	for rows.Next() {
 		n, err := r.scanNotifier(rows)
 		if err != nil {
+			if warnBadCredential(err) {
+				continue
+			}
 			return nil, err
 		}
 		out = append(out, n)

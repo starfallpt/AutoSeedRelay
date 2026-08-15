@@ -90,9 +90,9 @@ jobs:
           push: false
           tags: ghcr.io/${{ github.repository_owner }}/autoseedrelay:pr-${{ github.event.pull_request.number }}
 
-      # 镜像漏洞扫描（TODO: 稳定后 pin 到具体 SHA）
+      # 镜像漏洞扫描（仅在产生 dev 镜像的 main 分支执行；TODO: 稳定后 pin 到具体 SHA）
       - name: Trivy scan
-        if: github.event_name != 'pull_request'
+        if: github.ref == 'refs/heads/main'
         uses: aquasecurity/trivy-action@master
         with:
           image-ref: ghcr.io/${{ github.repository_owner }}/autoseedrelay:dev
