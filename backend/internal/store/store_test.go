@@ -19,8 +19,8 @@ func TestOpenMigrateIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("MigrateVersion: %v", err)
 	}
-	if ver != 3 {
-		t.Fatalf("expected schema version 3, got %d", ver)
+	if ver != 5 {
+		t.Fatalf("expected schema version 5, got %d", ver)
 	}
 
 	if err := s.Close(); err != nil {
@@ -36,8 +36,8 @@ func TestOpenMigrateIdempotent(t *testing.T) {
 
 	if ver, err := s2.MigrateVersion(); err != nil {
 		t.Fatalf("MigrateVersion after reopen: %v", err)
-	} else if ver != 3 {
-		t.Fatalf("expected schema version 3 after reopen, got %d", ver)
+	} else if ver != 5 {
+		t.Fatalf("expected schema version 5 after reopen, got %d", ver)
 	}
 
 	tables := []string{
@@ -78,6 +78,15 @@ func TestOpenMigrateIdempotent(t *testing.T) {
 	}
 	if n != 1 {
 		t.Fatalf("expected 1 strategies row, got %d", n)
+	}
+
+	// strategies must carry the monitor columns added by migration 00005.
+	for _, col := range []string{"disk_low_gb", "disk_critical_gb", "low_speed_kbps", "low_speed_duration_sec", "low_speed_action"} {
+		if err := s2.db.QueryRow(
+			"SELECT name FROM pragma_table_info('strategies') WHERE name=?", col,
+		).Scan(&col); err != nil {
+			t.Fatalf("strategies.%s column missing: %v", col, err)
+		}
 	}
 }
 

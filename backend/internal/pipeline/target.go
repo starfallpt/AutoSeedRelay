@@ -137,7 +137,7 @@ func (p *RelayOne) publishToOneTarget(ctx context.Context, seed *store.Seed, src
 		_ = p.repo.AppendLogSeed(ctx, seed.ID, "info", "published",
 			fmt.Sprintf("published to %s target_id=%d", t.Name, res.TargetID))
 		p.notify(ctx, notifier.LevelInfo, "发布成功",
-			fmt.Sprintf("seed %d 发布到 %s (target_id=%d)", seed.ID, t.Name, res.TargetID))
+			fmt.Sprintf("seed %d 发布到 %s (target_id=%d)", seed.ID, t.Name, res.TargetID), "published")
 		return nil
 	}
 
@@ -151,7 +151,7 @@ func (p *RelayOne) publishToOneTarget(ctx context.Context, seed *store.Seed, src
 		_ = p.repo.AppendLogSeed(ctx, seed.ID, "warning", "auth_expired",
 			fmt.Sprintf("%s: %s", t.Name, source.RedactError(err.Error())))
 		p.notify(ctx, notifier.LevelWarning, "目标站鉴权过期",
-			fmt.Sprintf("seed %d -> %s: %s", seed.ID, t.Name, source.RedactError(err.Error())))
+			fmt.Sprintf("seed %d -> %s: %s", seed.ID, t.Name, source.RedactError(err.Error())), "auth_expired")
 		return fmt.Errorf("auth expired: %w", err)
 	}
 
@@ -159,6 +159,8 @@ func (p *RelayOne) publishToOneTarget(ctx context.Context, seed *store.Seed, src
 	_ = p.repo.UpdateRecordAttempt(ctx, seed.ID, t.ID, statusFailed, source.RedactError(err.Error()))
 	_ = p.repo.AppendLogSeed(ctx, seed.ID, "warning", "publish_failed",
 		fmt.Sprintf("%s: %s", t.Name, source.RedactError(err.Error())))
+	p.notify(ctx, notifier.LevelWarning, "发布失败",
+		fmt.Sprintf("seed %d -> %s: %s", seed.ID, t.Name, source.RedactError(err.Error())), "publish_failed")
 	return err
 }
 
@@ -174,7 +176,7 @@ func (p *RelayOne) finishCrossSeed(ctx context.Context, seed *store.Seed, t *sto
 	_ = p.repo.AppendLogSeed(ctx, seed.ID, "info", "cross_seeding",
 		fmt.Sprintf("cross-seeded to %s (duplicate)", t.Name))
 	p.notify(ctx, notifier.LevelInfo, "交叉辅种",
-		fmt.Sprintf("seed %d 在 %s 已存在，已交叉辅种", seed.ID, t.Name))
+		fmt.Sprintf("seed %d 在 %s 已存在，已交叉辅种", seed.ID, t.Name), "cross_seeded")
 	return nil
 }
 

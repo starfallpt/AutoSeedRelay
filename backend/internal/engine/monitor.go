@@ -57,7 +57,9 @@ func (e *Engine) monitor(ctx context.Context) {
 			e.log.Warn("monitor: qb info failed", "qb", qi.Name, "error", err)
 			continue
 		}
+		e.monitorDisk(ctx, qi, inst)
 		e.monitorInstance(ctx, qi, torrents)
+		e.monitorSlow(ctx, qi, inst, torrents)
 	}
 }
 
@@ -74,16 +76,144 @@ func (e *Engine) observeHealth(ctx context.Context, statuses []qb.Status) {
 			online++
 		} else {
 			e.notify(ctx, notifier.LevelWarning, "qB 断连",
-				fmt.Sprintf("instance=%s error=%s", s.Name, s.LastError))
+				fmt.Sprintf("instance=%s error=%s", s.Name, s.LastError), "offline")
 		}
 	}
 	if online == 0 {
 		if e.qbAllOffline.CompareAndSwap(false, true) {
-			e.notify(ctx, notifier.LevelCritical, "qB 全部离线", "所有启用 qB 实例均不可达")
+			e.notify(ctx, notifier.LevelCritical, "qB 全部离线", "所有启用 qB 实例均不可达", "offline")
 		}
 		return
 	}
 	e.qbAllOffline.Store(false)
+}
+
+// monitorDisk checks one qB instance's free disk space against the strategy
+// thresholds and emits a critical/warning notification on state transitions.
+// critical additionally appends an activity log. The per-instance state is
+// tracked in e.diskState so a persistent condition is not re-notified every
+// round; after a restart the state is forgotten and a re-notify is acceptable.
+func (e *Engine) monitorDisk(ctx context.Context, qi *store.QBInstance, inst *qb.Instance) {
+	st := e.strategy(ctx)
+	info, err := inst.GetDiskSpace(ctx)
+	if err != nil {
+		return // disk query failed: treat as unknown, do not spam
+	}
+	freeGB := float64(info.FreeOnDisk) / (1024 * 1024 * 1024)
+
+	state := "ok"
+	switch {
+	case freeGB < float64(st.DiskCriticalGB):
+		state = "critical"
+	case freeGB < float64(st.DiskLowGB):
+		state = "low"
+	}
+
+	e.diskMu.Lock()
+	prev := e.diskState[qi.Name]
+	e.diskState[qi.Name] = state
+	e.diskMu.Unlock()
+
+	switch state {
+	case "critical":
+		if prev == "critical" {
+			return
+		}
+		e.notify(ctx, notifier.LevelCritical, "磁盘空间不足(紧急)",
+			fmt.Sprintf("instance=%s 剩余 %.1f GB,低于 %d GB", qi.Name, freeGB, st.DiskCriticalGB), "disk")
+		if err := e.repo.AppendLog(ctx, "critical", "disk_critical",
+			fmt.Sprintf("instance=%s free=%.1fGB critical=%dGB", qi.Name, freeGB, st.DiskCriticalGB)); err != nil {
+			e.log.Warn("monitor: append disk critical log", "error", err)
+		}
+	case "low":
+		if prev == "low" {
+			return
+		}
+		e.notify(ctx, notifier.LevelWarning, "磁盘空间偏低",
+			fmt.Sprintf("instance=%s 剩余 %.1f GB,低于 %d GB", qi.Name, freeGB, st.DiskLowGB), "disk")
+	}
+}
+
+// monitorSlow aborts torrents whose download speed has been below the strategy
+// threshold for longer than the configured duration, when low_speed_action is
+// "abort" (BIZ-SPEC §5). The torrent is mapped back to a seed via its replica
+// on this instance (origin preferred).
+func (e *Engine) monitorSlow(ctx context.Context, qi *store.QBInstance, inst *qb.Instance, torrents []*qb.TorrentInfo) {
+	st := e.strategy(ctx)
+	if st.LowSpeedAction != "abort" || st.LowSpeedKbps <= 0 {
+		return
+	}
+	duration := time.Duration(st.LowSpeedDurationSec) * time.Second
+
+	replicas, err := e.repo.ListReplicasByQB(ctx, qi.ID)
+	if err != nil {
+		e.log.Warn("monitor: list replicas for slow check", "qb", qi.Name, "error", err)
+		return
+	}
+	// hash → seed id, origin replicas preferred over cross.
+	seedByHash := make(map[string]int64, len(replicas))
+	for _, r := range replicas {
+		h := strings.ToLower(r.InfoHash)
+		if _, ok := seedByHash[h]; !ok || r.Role == "origin" {
+			seedByHash[h] = r.SeedID
+		}
+	}
+
+	for _, t := range torrents {
+		if t == nil || t.Hash == "" || !isDownloadingState(t.State) {
+			continue
+		}
+		if !inst.IsSlow(ctx, t.Hash, int(st.LowSpeedKbps), duration) {
+			continue
+		}
+		seedID, ok := seedByHash[strings.ToLower(t.Hash)]
+		if !ok {
+			continue // no replica ownership on this qB: nothing to abort
+		}
+		e.abortSlowTorrent(ctx, qi, inst, t, seedID)
+	}
+}
+
+// abortSlowTorrent performs the low-speed abort for one slow torrent: delete
+// from qB, mark the seed's in-flight relay records failed, bump retry +
+// re-enqueue the seed, and emit a warning notification.
+func (e *Engine) abortSlowTorrent(ctx context.Context, qi *store.QBInstance, inst *qb.Instance, t *qb.TorrentInfo, seedID int64) {
+	if err := inst.Delete(ctx, t.Hash, false); err != nil {
+		e.log.Warn("monitor: low-speed abort delete failed", "hash", t.Hash, "error", err)
+		return
+	}
+
+	records, err := e.repo.ListRecordsBySeed(ctx, seedID)
+	if err != nil {
+		e.log.Warn("monitor: low-speed abort list records", "seed_id", seedID, "error", err)
+		return
+	}
+	for _, rec := range records {
+		if isDoneRecordStatus(rec.Status) {
+			continue
+		}
+		if err := e.repo.UpdateRecordAttempt(ctx, seedID, rec.TargetID, "failed", "low_speed_abort"); err != nil {
+			e.log.Warn("monitor: low-speed abort mark record", "seed_id", seedID, "target_id", rec.TargetID, "error", err)
+		}
+	}
+
+	// Re-enter the retry queue: the next retry number is the pre-bump
+	// retry_count + 1, matching the value BumpRetry writes next.
+	retryNo := int64(1)
+	if sd, err := e.repo.GetSeedByID(ctx, seedID); err == nil && sd.RetryCount >= 0 {
+		retryNo = sd.RetryCount + 1
+	}
+	if err := e.repo.BumpRetry(ctx, seedID); err != nil {
+		e.log.Warn("monitor: low-speed abort bump retry", "seed_id", seedID, "error", err)
+	}
+	if err := e.repo.UpdateSeedStatus(ctx, seedID, "retry", "low_speed_abort"); err != nil {
+		e.log.Warn("monitor: low-speed abort mark retry", "seed_id", seedID, "error", err)
+	}
+	e.retry.Enqueue(seedID, int(retryNo))
+
+	e.notify(ctx, notifier.LevelWarning, "低速率中止",
+		fmt.Sprintf("instance=%s seed=%d hash=%s 下载过慢,已中止并重试", qi.Name, seedID, t.Hash), "low_speed")
+	e.log.Warn("monitor: low-speed abort", "qb", qi.Name, "seed_id", seedID, "hash", t.Hash)
 }
 
 // monitorInstance reconciles one qB instance's torrents against the seeds and
@@ -236,7 +366,7 @@ func (e *Engine) retireCheck(ctx context.Context, sd *store.Seed, qi *store.QBIn
 			e.log.Warn("monitor: append retired log", "error", err)
 		}
 		e.notify(ctx, notifier.LevelInfo, "自动撤种",
-			fmt.Sprintf("seed=%d target=%d %s", sd.ID, rec.TargetID, reason))
+			fmt.Sprintf("seed=%d target=%d %s", sd.ID, rec.TargetID, reason), "retire")
 	}
 
 	// Drop replicas and close out the seed's lifecycle.
@@ -290,6 +420,19 @@ func isPublishedStatus(status string) bool {
 	default:
 		return false
 	}
+}
+
+// isDownloadingState reports whether a qB torrent state means "actively
+// downloading" (the set IsSlow also recognises).
+func isDownloadingState(state string) bool {
+	return strings.EqualFold(state, "downloading") || strings.EqualFold(state, "stalledDL")
+}
+
+// isDoneRecordStatus reports whether a relay-record status means the target is
+// finished (published / cross-seeding / seeding / retired); those records must
+// not be re-failed by a low-speed abort.
+func isDoneRecordStatus(status string) bool {
+	return isPublishedStatus(status) || status == "retired"
 }
 
 // shouldRetire evaluates the retire strategy against one completed torrent.

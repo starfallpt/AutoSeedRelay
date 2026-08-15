@@ -32,11 +32,15 @@ const (
 	LevelInfo     Level = "info"
 )
 
-// Message is a single notification to deliver.
+// Message is a single notification to deliver. Event is an optional action tag
+// (e.g. "retire", "disk", "low_speed") used by the router to aggregate
+// warning/info events per (instance, tier, event) instead of lumping every
+// event of the same tier together.
 type Message struct {
 	Title string
 	Body  string
 	Level Level
+	Event string
 }
 
 // String renders the message as one line, used when aggregating a window.
@@ -72,45 +76,49 @@ const (
 // Config holds the plaintext configuration for one notifier instance.
 // Sensitive fields (tokens, passwords) are stored in cleartext here; the
 // storage layer is responsible for encrypting them at rest.
+//
+// The json tags are snake_case and match the frontend's notifier config payload,
+// so a config object submitted by the UI (e.g. {"webhook_url":"..."}) round-trips
+// through json.Unmarshal into this struct.
 type Config struct {
-	Type    ProviderType
-	Enabled bool
-	Name    string // instance name used by the router's subscription matrix
+	Type    ProviderType `json:"type,omitempty"`
+	Enabled bool         `json:"enabled,omitempty"`
+	Name    string       `json:"name,omitempty"` // instance name used by the router's subscription matrix
 
 	// webhook
-	WebhookURL     string
-	WebhookHeaders map[string]string
+	WebhookURL     string            `json:"webhook_url,omitempty"`
+	WebhookHeaders map[string]string `json:"webhook_headers,omitempty"`
 
 	// telegram
-	TelegramToken   string
-	TelegramChatID  string
-	TelegramBaseURL string // default https://api.telegram.org
+	TelegramToken   string `json:"telegram_token,omitempty"`
+	TelegramChatID  string `json:"telegram_chat_id,omitempty"`
+	TelegramBaseURL string `json:"telegram_base_url,omitempty"` // default https://api.telegram.org
 
 	// smtp
-	SMTPHost string
-	SMTPPort int
-	SMTPUser string
-	SMTPPass string
-	SMTPFrom string
-	SMTPTo   []string
+	SMTPHost string   `json:"smtp_host,omitempty"`
+	SMTPPort int      `json:"smtp_port,omitempty"`
+	SMTPUser string   `json:"smtp_user,omitempty"`
+	SMTPPass string   `json:"smtp_pass,omitempty"`
+	SMTPFrom string   `json:"smtp_from,omitempty"`
+	SMTPTo   []string `json:"smtp_to,omitempty"`
 
 	// ntfy
-	NtfyURL   string // full topic URL; defaults to https://ntfy.sh/<NtfyTopic>
-	NtfyTopic string
-	NtfyUser  string
-	NtfyPass  string
+	NtfyURL   string `json:"ntfy_url,omitempty"` // full topic URL; defaults to https://ntfy.sh/<NtfyTopic>
+	NtfyTopic string `json:"ntfy_topic,omitempty"`
+	NtfyUser  string `json:"ntfy_user,omitempty"`
+	NtfyPass  string `json:"ntfy_pass,omitempty"`
 
 	// gotify
-	GotifyURL   string
-	GotifyToken string
+	GotifyURL   string `json:"gotify_url,omitempty"`
+	GotifyToken string `json:"gotify_token,omitempty"`
 
 	// serverchan
-	ServerChanURL string
-	ServerChanKey string
+	ServerChanURL string `json:"serverchan_url,omitempty"`
+	ServerChanKey string `json:"serverchan_key,omitempty"`
 
 	// pushplus
-	PushPlusURL   string
-	PushPlusToken string
+	PushPlusURL   string `json:"pushplus_url,omitempty"`
+	PushPlusToken string `json:"pushplus_token,omitempty"`
 }
 
 const (

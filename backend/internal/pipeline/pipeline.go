@@ -534,12 +534,13 @@ func (p *RelayOne) qbInstanceByID(ctx context.Context, id int64) *store.QBInstan
 }
 
 // notify delivers a best-effort notification through the router. The body is
-// redacted so credential-bearing URLs never leak into notification text.
-func (p *RelayOne) notify(ctx context.Context, level notifier.Level, title, body string) {
+// redacted so credential-bearing URLs never leak into notification text. The
+// event tag feeds the router's per-(instance, tier, event) aggregation.
+func (p *RelayOne) notify(ctx context.Context, level notifier.Level, title, body, event string) {
 	if p.notifier == nil {
 		return
 	}
-	_ = p.notifier.Notify(ctx, level, notifier.Message{Title: title, Body: source.RedactError(body)})
+	_ = p.notifier.Notify(ctx, level, notifier.Message{Title: title, Body: source.RedactError(body), Event: event})
 }
 
 func itemTorrentID(item *source.RssItem) int {

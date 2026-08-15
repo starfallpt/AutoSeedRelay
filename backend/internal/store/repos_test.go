@@ -560,12 +560,18 @@ func TestStrategyCRUD(t *testing.T) {
 	if st.ID != 1 || st.RetireSeeders != 10 || st.RetireMinutes != 60 || st.RetireMode != "and" || st.DispatchMode != "priority" || st.RetryMax != 3 {
 		t.Fatalf("default strategy mismatch: %+v", st)
 	}
+	if st.DiskLowGB != 50 || st.DiskCriticalGB != 20 || st.LowSpeedKbps != 100 ||
+		st.LowSpeedDurationSec != 600 || st.LowSpeedAction != "abort" {
+		t.Fatalf("default monitor strategy mismatch: %+v", st)
+	}
 
 	upd := &Strategy{
 		ID: 1, Promotions: `["free"]`, Keywords: `["x264"]`, MinSize: 100, MaxSize: 200,
 		RetireSeeders: 5, RetireMinutes: 30, RetireRatioEnabled: 1, RetireRatio: 2.5,
 		RetireMode: "or", DispatchMode: "least_jobs", Timezone: "Asia/Shanghai",
 		ImageHost: `{"url":"https://img"}`, ImageCoverEnabled: 1, RetryMax: 5,
+		DiskLowGB: 60, DiskCriticalGB: 25, LowSpeedKbps: 200,
+		LowSpeedDurationSec: 900, LowSpeedAction: "abort",
 	}
 	if err := repo.UpdateStrategy(ctx, upd); err != nil {
 		t.Fatalf("UpdateStrategy: %v", err)
@@ -579,6 +585,10 @@ func TestStrategyCRUD(t *testing.T) {
 		got.DispatchMode != "least_jobs" || got.Timezone != "Asia/Shanghai" ||
 		got.ImageCoverEnabled != 1 || got.RetryMax != 5 {
 		t.Fatalf("strategy update mismatch: %+v", got)
+	}
+	if got.DiskLowGB != 60 || got.DiskCriticalGB != 25 || got.LowSpeedKbps != 200 ||
+		got.LowSpeedDurationSec != 900 || got.LowSpeedAction != "abort" {
+		t.Fatalf("monitor strategy update mismatch: %+v", got)
 	}
 }
 

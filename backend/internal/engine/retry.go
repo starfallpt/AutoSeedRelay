@@ -241,7 +241,7 @@ func (e *Engine) submitJob(ctx context.Context, seedID int64, retryNo int) {
 			e.log.Warn("retry: mark seed seeding (partial)", "seed_id", seedID, "error", ferr)
 		}
 		e.notify(ctx, notifier.LevelCritical, "部分目标重试耗尽",
-			fmt.Sprintf("seed_id=%d 重试 %d 次后仍有目标失败(已保留成功目标): %s", seedID, maxRetries, strings.Join(pf.FailedNames(), "; ")))
+			fmt.Sprintf("seed_id=%d 重试 %d 次后仍有目标失败(已保留成功目标): %s", seedID, maxRetries, strings.Join(pf.FailedNames(), "; ")), "retry")
 		e.log.Error("retry: partial exhausted", "seed_id", seedID, "retries", maxRetries, "error", errMsg)
 		return
 	}
@@ -250,6 +250,6 @@ func (e *Engine) submitJob(ctx context.Context, seedID int64, retryNo int) {
 		e.log.Warn("retry: mark seed failed", "seed_id", seedID, "error", ferr)
 	}
 	e.notify(ctx, notifier.LevelCritical, "种子重试耗尽",
-		fmt.Sprintf("seed_id=%d 重试 %d 次仍失败,已进入失败队列待手动重试: %s", seedID, maxRetries, errMsg))
+		fmt.Sprintf("seed_id=%d 重试 %d 次仍失败,已进入失败队列待手动重试: %s", seedID, maxRetries, errMsg), "failed")
 	e.log.Error("retry: exhausted", "seed_id", seedID, "retries", maxRetries, "error", errMsg)
 }

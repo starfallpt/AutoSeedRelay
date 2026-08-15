@@ -21,11 +21,14 @@ type routedInstance struct {
 	tiers    map[Level]bool
 }
 
-// aggregate collects warning/info events for one (instance, tier) inside a
-// single aggregation window.
+// aggregate collects warning/info events for one (instance, tier, event) inside
+// a single aggregation window. Grouping by event keeps semantically distinct
+// events (e.g. "disk" vs "low_speed" vs "offline") in separate messages rather
+// than merging them into one generic tier batch.
 type aggregate struct {
 	instance string
 	level    Level
+	event    string
 	count    int
 	lines    []string
 	deadline time.Time
@@ -36,6 +39,7 @@ func (a *aggregate) toMessage() Message {
 		Title: fmt.Sprintf("%d 条 %s", a.count, string(a.level)),
 		Body:  strings.Join(a.lines, "\n"),
 		Level: a.level,
+		Event: a.event,
 	}
 }
 
@@ -215,12 +219,13 @@ func (r *Router) buffer(ctx context.Context, level Level, msg Message) error {
 		if !inst.tiers[level] {
 			continue
 		}
-		key := inst.name + "|" + string(level)
+		key := inst.name + "|" + string(level) + "|" + msg.Event
 		agg := r.pending[key]
 		if agg == nil {
 			agg = &aggregate{
 				instance: inst.name,
 				level:    level,
+				event:    msg.Event,
 				deadline: now.Add(r.window),
 			}
 			r.pending[key] = agg

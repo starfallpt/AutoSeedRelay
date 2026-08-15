@@ -99,8 +99,8 @@ func (f *fakePipeline) Relay(_ context.Context, seedID int64) error {
 // pipeline.
 type fakePartialFailure struct{ failed []string }
 
-func (f *fakePartialFailure) Error() string { return "partial: " + strings.Join(f.failed, ", ") }
-func (f *fakePartialFailure) IsPartial() bool { return true }
+func (f *fakePartialFailure) Error() string         { return "partial: " + strings.Join(f.failed, ", ") }
+func (f *fakePartialFailure) IsPartial() bool       { return true }
 func (f *fakePartialFailure) FailedNames() []string { return f.failed }
 
 func (f *fakePipeline) count() int {
@@ -767,8 +767,8 @@ func TestRetryRedactsCredential(t *testing.T) {
 // call returns a partial failure, subsequent calls mark the seed "seeding" and
 // succeed.
 type seedingPipeline struct {
-	repo *store.Repo
-	mu   sync.Mutex
+	repo  *store.Repo
+	mu    sync.Mutex
 	calls int
 }
 
@@ -1020,5 +1020,228 @@ func TestEngineStopRestartConcurrent(t *testing.T) {
 	}
 	if eng.Running() {
 		t.Fatal("engine still running after final Stop")
+	}
+}
+
+// --- ResendSeed ---
+
+func TestResendSeedRerun(t *testing.T) {
+	repo := newTestRepo(t)
+	pl := &fakePipeline{}
+	eng := New(Config{Workers: 1}, repo, pl, qb.NewManager(), nil)
+	clk := &fakeClock{t: time.Unix(1_700_000_000, 0)}
+	eng.SetClock(clk.Now)
+
+	sd := &store.Seed{SourceSite: "src", InfoHash: testHash, Title: "T", Status: "failed", RetryCount: 7, Error: "boom"}
+	if _, err := repo.CreateSeed(ctx, sd); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := eng.ResendSeed(ctx, sd.ID, false); err != nil {
+		t.Fatalf("ResendSeed: %v", err)
+	}
+
+	got, err := repo.GetSeedByID(ctx, sd.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != "retry" || got.RetryCount != 0 || got.Error != "" {
+		t.Fatalf("seed after rerun = %+v, want retry/0/empty-error", got)
+	}
+
+	// Enqueued at retry number 1 (first 60s backoff).
+	clk.Advance(60 * time.Second)
+	due := eng.retry.Due()
+	if len(due) != 1 || due[0].seedID != sd.ID || due[0].retryNo != 1 {
+		t.Fatalf("due after rerun = %+v, want seedID=%d retryNo=1", due, sd.ID)
+	}
+
+	// Drain into the pipeline so the recording fake observes the call.
+	eng.submitJob(ctx, due[0].seedID, due[0].retryNo)
+	if got := pl.ids(); len(got) != 1 || got[0] != sd.ID {
+		t.Fatalf("pipeline calls = %v, want [%d]", got, sd.ID)
+	}
+}
+
+func TestResendSeedFullRerun(t *testing.T) {
+	repo := newTestRepo(t)
+	pl := &fakePipeline{}
+	eng := New(Config{Workers: 1}, repo, pl, qb.NewManager(), nil)
+	clk := &fakeClock{t: time.Unix(1_700_000_000, 0)}
+	eng.SetClock(clk.Now)
+
+	sd := &store.Seed{SourceSite: "src", InfoHash: testHash, Title: "T", Status: "failed", RetryCount: 3, Error: "x"}
+	if _, err := repo.CreateSeed(ctx, sd); err != nil {
+		t.Fatal(err)
+	}
+	tgt := &store.Target{Name: "t1", Type: "nexusphp", Version: "api", Status: "active"}
+	if err := repo.UpsertTarget(ctx, tgt); err != nil {
+		t.Fatal(err)
+	}
+	rec := &store.RelayRecord{SeedID: sd.ID, TargetID: tgt.ID, Role: "publisher", Status: "published"}
+	if inserted, err := repo.UpsertRecord(ctx, rec); err != nil || !inserted {
+		t.Fatalf("UpsertRecord = (%v,%v), want (true,nil)", inserted, err)
+	}
+	qbMgr := qb.NewManager()
+	qbID, _ := registerFakeQB(t, repo, qbMgr, "qb", 1, nil, 0)
+	if err := repo.UpsertReplica(ctx, &store.Replica{SeedID: sd.ID, QBID: qbID, InfoHash: testHash, Role: "origin", Status: "seeding", Progress: 1}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := eng.ResendSeed(ctx, sd.ID, true); err != nil {
+		t.Fatalf("ResendSeed fullRerun: %v", err)
+	}
+
+	if n := rawCount(t, repo, `SELECT count(*) FROM relay_records WHERE seed_id=?`, sd.ID); n != 0 {
+		t.Fatalf("relay_records after full rerun = %d, want 0", n)
+	}
+	if n := rawCount(t, repo, `SELECT count(*) FROM seed_replicas WHERE seed_id=?`, sd.ID); n != 0 {
+		t.Fatalf("seed_replicas after full rerun = %d, want 0", n)
+	}
+	got, err := repo.GetSeedByID(ctx, sd.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != "retry" || got.RetryCount != 0 || got.Error != "" {
+		t.Fatalf("seed after full rerun = %+v, want retry/0/empty-error", got)
+	}
+	clk.Advance(60 * time.Second)
+	due := eng.retry.Due()
+	if len(due) != 1 || due[0].seedID != sd.ID || due[0].retryNo != 1 {
+		t.Fatalf("due after full rerun = %+v, want seedID=%d retryNo=1", due, sd.ID)
+	}
+}
+
+// --- disk / low-speed monitor ---
+
+func TestMonitorDiskCriticalNotifiesAndLogs(t *testing.T) {
+	repo := newTestRepo(t)
+	qbMgr := qb.NewManager()
+	registerFakeQB(t, repo, qbMgr, "qb", 1, nil, 1*1024*1024*1024) // 1 GB free < critical 20 GB
+
+	rec := &recordingNotifier{}
+	router := notifier.NewRouter()
+	router.Add("rec", rec, notifier.LevelCritical, notifier.LevelWarning)
+	eng := New(Config{Workers: 1}, repo, &fakePipeline{}, qbMgr, router)
+
+	eng.monitor(ctx)
+	msgs := rec.messages()
+	if len(msgs) != 1 {
+		t.Fatalf("critical notifications = %d, want 1", len(msgs))
+	}
+	if msgs[0].Event != "disk" || msgs[0].Level != notifier.LevelCritical {
+		t.Fatalf("critical msg = %+v, want event=disk level=critical", msgs[0])
+	}
+	if n := rawCount(t, repo, `SELECT count(*) FROM activity_log WHERE action='disk_critical'`); n != 1 {
+		t.Fatalf("disk_critical log rows = %d, want 1", n)
+	}
+
+	// Second round: same critical state → deduped (no re-notify, no re-log).
+	eng.monitor(ctx)
+	if got := len(rec.messages()); got != 1 {
+		t.Fatalf("notifications after 2nd round = %d, want 1 (deduped)", got)
+	}
+	if n := rawCount(t, repo, `SELECT count(*) FROM activity_log WHERE action='disk_critical'`); n != 1 {
+		t.Fatalf("disk_critical log rows after 2nd round = %d, want 1 (deduped)", n)
+	}
+}
+
+func TestMonitorDiskLowWarns(t *testing.T) {
+	repo := newTestRepo(t)
+	qbMgr := qb.NewManager()
+	registerFakeQB(t, repo, qbMgr, "qb", 1, nil, 30*1024*1024*1024) // 30 GB: low (<50), not critical (>=20)
+
+	rec := &recordingNotifier{}
+	router := notifier.NewRouter()
+	router.Add("rec", rec, notifier.LevelWarning)
+	eng := New(Config{Workers: 1}, repo, &fakePipeline{}, qbMgr, router)
+
+	eng.monitor(ctx)
+	router.Flush(ctx)
+	msgs := rec.messages()
+	if len(msgs) != 1 {
+		t.Fatalf("warning notifications = %d, want 1", len(msgs))
+	}
+	if msgs[0].Event != "disk" || msgs[0].Level != notifier.LevelWarning {
+		t.Fatalf("warning msg = %+v, want event=disk level=warning", msgs[0])
+	}
+}
+
+func TestMonitorLowSpeedAbort(t *testing.T) {
+	repo := newTestRepo(t)
+	st, err := repo.GetStrategy(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.LowSpeedKbps = 100
+	st.LowSpeedDurationSec = 0 // zero duration → IsSlow true on its 2nd call
+	st.LowSpeedAction = "abort"
+	if err := repo.UpdateStrategy(ctx, st); err != nil {
+		t.Fatal(err)
+	}
+
+	sd := &store.Seed{SourceSite: "src", InfoHash: testHash, Title: "T", Status: "downloading"}
+	if _, err := repo.CreateSeed(ctx, sd); err != nil {
+		t.Fatal(err)
+	}
+	tgt := &store.Target{Name: "t1", Type: "nexusphp", Version: "api", Status: "active"}
+	if err := repo.UpsertTarget(ctx, tgt); err != nil {
+		t.Fatal(err)
+	}
+	rec := &store.RelayRecord{SeedID: sd.ID, TargetID: tgt.ID, Role: "publisher", Status: "pending"}
+	if inserted, err := repo.UpsertRecord(ctx, rec); err != nil || !inserted {
+		t.Fatalf("UpsertRecord = (%v,%v), want (true,nil)", inserted, err)
+	}
+
+	qbMgr := qb.NewManager()
+	slow := &qb.TorrentInfo{Hash: testHash, Name: "slow", State: "downloading", DLSpeed: 0, Progress: 0.5}
+	qbID, fq := registerFakeQB(t, repo, qbMgr, "qb", 1, []*qb.TorrentInfo{slow}, 1000*1024*1024*1024)
+	if err := repo.UpsertReplica(ctx, &store.Replica{SeedID: sd.ID, QBID: qbID, InfoHash: testHash, Role: "origin", Status: "downloading", Progress: 0.5}); err != nil {
+		t.Fatal(err)
+	}
+
+	rec2 := &recordingNotifier{}
+	router := notifier.NewRouter()
+	router.Add("rec", rec2, notifier.LevelWarning)
+	eng := New(Config{Workers: 1}, repo, &fakePipeline{}, qbMgr, router)
+	clk := &fakeClock{t: time.Unix(1_700_000_000, 0)}
+	eng.SetClock(clk.Now)
+
+	// First pass: IsSlow initializes its belowStart timer and returns false.
+	eng.monitor(ctx)
+	if fq.deleteCount() != 0 {
+		t.Fatalf("delete after 1st pass = %d, want 0", fq.deleteCount())
+	}
+
+	// Second pass: IsSlow now reports slow → abort.
+	eng.monitor(ctx)
+	if fq.deleteCount() != 1 {
+		t.Fatalf("delete after 2nd pass = %d, want 1", fq.deleteCount())
+	}
+	gotRec, err := repo.GetRecord(ctx, sd.ID, tgt.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotRec.Status != "failed" || gotRec.LastError != "low_speed_abort" {
+		t.Fatalf("record after abort = %+v, want failed/low_speed_abort", gotRec)
+	}
+	got, err := repo.GetSeedByID(ctx, sd.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != "retry" || got.RetryCount != 1 || got.Error != "low_speed_abort" {
+		t.Fatalf("seed after abort = %+v, want retry/1/low_speed_abort", got)
+	}
+
+	clk.Advance(60 * time.Second)
+	due := eng.retry.Due()
+	if len(due) != 1 || due[0].seedID != sd.ID || due[0].retryNo != 1 {
+		t.Fatalf("retry queue after abort = %+v, want seedID=%d retryNo=1", due, sd.ID)
+	}
+
+	router.Flush(ctx)
+	msgs := rec2.messages()
+	if len(msgs) != 1 || msgs[0].Event != "low_speed" {
+		t.Fatalf("low_speed notifications = %+v, want 1 with event=low_speed", msgs)
 	}
 }

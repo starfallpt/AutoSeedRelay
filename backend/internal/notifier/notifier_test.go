@@ -66,6 +66,12 @@ func (n *recordingNotifier) last() Message {
 	return n.calls[len(n.calls)-1]
 }
 
+func (n *recordingNotifier) messages() []Message {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return append([]Message(nil), n.calls...)
+}
+
 func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(v)
@@ -239,6 +245,43 @@ func TestRouterWarningAggregation(t *testing.T) {
 	}
 	if !strings.Contains(got.Body, "first") || !strings.Contains(got.Body, "second") {
 		t.Fatalf("aggregate body = %q, want both events", got.Body)
+	}
+}
+
+func TestRouterAggregatesPerEvent(t *testing.T) {
+	n := &recordingNotifier{}
+	r := NewRouter()
+	r.Add("inst", n, LevelWarning)
+
+	ctx := context.Background()
+	_ = r.Notify(ctx, LevelWarning, Message{Title: "d1", Body: "disk one", Event: "disk"})
+	_ = r.Notify(ctx, LevelWarning, Message{Title: "s1", Body: "slow one", Event: "low_speed"})
+	_ = r.Notify(ctx, LevelWarning, Message{Title: "d2", Body: "disk two", Event: "disk"})
+
+	r.Flush(ctx)
+	if n.count() != 2 {
+		t.Fatalf("calls after flush = %d, want 2 (one per event)", n.count())
+	}
+
+	disk, slow := 0, 0
+	for _, m := range n.messages() {
+		switch m.Event {
+		case "disk":
+			disk++
+			if m.Title != "2 条 warning" || !strings.Contains(m.Body, "disk one") || !strings.Contains(m.Body, "disk two") {
+				t.Fatalf("disk aggregate = %+v, want 2 lines titled %q", m, "2 条 warning")
+			}
+		case "low_speed":
+			slow++
+			if m.Title != "1 条 warning" || !strings.Contains(m.Body, "slow one") {
+				t.Fatalf("low_speed aggregate = %+v, want 1 line titled %q", m, "1 条 warning")
+			}
+		default:
+			t.Fatalf("unexpected aggregate event %q", m.Event)
+		}
+	}
+	if disk != 1 || slow != 1 {
+		t.Fatalf("disk aggregates=%d slow aggregates=%d, want 1 each", disk, slow)
 	}
 }
 

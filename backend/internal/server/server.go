@@ -10,9 +10,10 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
-	"os"
+	"strconv"
 	"time"
 
+	"github.com/autoseedrelay/relay/internal/auth"
 	"github.com/autoseedrelay/relay/internal/config"
 	"github.com/autoseedrelay/relay/internal/engine"
 	"github.com/autoseedrelay/relay/internal/store"
@@ -24,10 +25,15 @@ import (
 const Version = "0.1.0-m0"
 
 // Deps carries the runtime dependencies the health endpoint reports on. Every
-// field is optional (nil-safe), so M0-only wiring still works.
+// field is optional (nil-safe), so M0-only wiring still works. RegisterAPI (if
+// set) mounts the full v2 API surface (config + ops domains) on the /api/v2
+// group; it is a closure injected by the wiring layer (cmd/relay) so the
+// server package stays decoupled from the api package.
 type Deps struct {
-	Store  *store.Store
-	Engine *engine.Engine
+	Store       *store.Store
+	Engine      *engine.Engine
+	Auth        *auth.Manager
+	RegisterAPI func(rg *gin.RouterGroup)
 }
 
 // Server holds the wired Gin engine and deployment config.
@@ -50,6 +56,9 @@ func New(cfg *config.Config, logger *slog.Logger, deps Deps) (*Server, error) {
 	engine := gin.New()
 	// Middleware chain (see docs/ARCHITECTURE-v4.md §10): Recovery → RequestID → slog.
 	engine.Use(Recovery(logger), RequestID(), SlogLogger(logger))
+	if deps.Auth != nil {
+		engine.Use(deps.Auth.Middleware())
+	}
 
 	s := &Server{cfg: cfg, logger: logger, engine: engine, deps: deps}
 	s.routes()
@@ -117,6 +126,13 @@ func (s *Server) routes() {
 	{
 		api.GET("/health", s.handleHealth)
 		api.POST("/auth/login", s.handleLogin)
+		api.POST("/auth/logout", s.handleLogout)
+		api.GET("/auth/me", s.handleMe)
+		api.GET("/setup/status", s.handleSetupStatus)
+		api.POST("/setup/complete", s.handleSetupComplete)
+		if s.deps.RegisterAPI != nil {
+			s.deps.RegisterAPI(api)
+		}
 	}
 
 	webfs.Register(s.engine)
@@ -140,12 +156,23 @@ func (s *Server) handleHealth(c *gin.Context) {
 	c.JSON(http.StatusOK, resp)
 }
 
-// handleLogin is a placeholder for M0. It accepts {"password": "..."} and
-// compares it against the AUTOSEED_WEB_PASSWORD environment variable.
-//
-// TODO(M1): replace plaintext compare with bcrypt against a DB-stored hash and
-// issue a session cookie (see docs/ARCHITECTURE-v4.md §5/§10).
+// handleLogin verifies the web password against the stored bcrypt hash and, on
+// success, issues a session cookie and a CSRF token. It is rate-limited per IP
+// (see auth.Manager.AllowLogin). When deps.Auth is nil (auth not yet wired) it
+// returns 503 so the server can boot without auth during gradual wiring.
 func (s *Server) handleLogin(c *gin.Context) {
+	if s.deps.Auth == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"ok": false, "error": "auth not configured"})
+		return
+	}
+	a := s.deps.Auth
+
+	if allowed, retry := a.AllowLogin(c.ClientIP()); !allowed {
+		c.Header("Retry-After", strconv.Itoa(int(retry.Seconds())+1))
+		c.JSON(http.StatusTooManyRequests, gin.H{"ok": false, "error": "too many attempts"})
+		return
+	}
+
 	var req struct {
 		Password string `json:"password"`
 	}
@@ -154,17 +181,90 @@ func (s *Server) handleLogin(c *gin.Context) {
 		return
 	}
 
-	expected := os.Getenv("AUTOSEED_WEB_PASSWORD")
-	if expected == "" {
-		s.logger.Warn("login rejected: AUTOSEED_WEB_PASSWORD is not set")
-		c.JSON(http.StatusServiceUnavailable, gin.H{"ok": false, "error": "password not configured"})
+	if !a.SetupState() {
+		c.JSON(http.StatusForbidden, gin.H{"ok": false, "error": "setup required"})
 		return
 	}
 
-	if req.Password != expected {
+	ok, err := a.Login(c.Request.Context(), req.Password)
+	if err != nil {
+		s.logger.Error("login", "err", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"ok": false})
+		return
+	}
+	if !ok {
 		c.JSON(http.StatusUnauthorized, gin.H{"ok": false})
 		return
 	}
+
+	a.StartSession(c)
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+// handleLogout clears the session and CSRF cookies. Auth + CSRF are enforced by
+// the middleware before this handler runs.
+func (s *Server) handleLogout(c *gin.Context) {
+	if s.deps.Auth == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"ok": false, "error": "auth not configured"})
+		return
+	}
+	s.deps.Auth.EndSession(c)
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+// handleMe reports the current session is valid (the middleware already checked
+// it) and refreshes the CSRF token.
+func (s *Server) handleMe(c *gin.Context) {
+	if s.deps.Auth == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"ok": false, "error": "auth not configured"})
+		return
+	}
+	s.deps.Auth.IssueCSRF(c)
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+// handleSetupStatus reports whether the web password has been initialized.
+func (s *Server) handleSetupStatus(c *gin.Context) {
+	if s.deps.Auth == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"ok": false, "error": "auth not configured"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"initialized": s.deps.Auth.SetupState()})
+}
+
+// handleSetupComplete sets the initial web password. It only works while the
+// system is uninitialized; afterwards it returns 403.
+func (s *Server) handleSetupComplete(c *gin.Context) {
+	if s.deps.Auth == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"ok": false, "error": "auth not configured"})
+		return
+	}
+	if s.deps.Auth.SetupState() {
+		c.JSON(http.StatusForbidden, gin.H{"ok": false, "error": "already initialized"})
+		return
+	}
+	var req struct {
+		Password string `json:"password"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"ok": false, "error": "invalid request body"})
+		return
+	}
+	if err := s.deps.Auth.CompleteSetup(req.Password); err != nil {
+		switch {
+		case errors.Is(err, auth.ErrAlreadyInitialized):
+			c.JSON(http.StatusForbidden, gin.H{"ok": false, "error": "already initialized"})
+		case errors.Is(err, auth.ErrEmptyPassword):
+			c.JSON(http.StatusBadRequest, gin.H{"ok": false, "error": "password required"})
+		default:
+			s.logger.Error("setup complete", "err", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"ok": false})
+		}
+		return
+	}
+	// Setup success immediately issues a session + CSRF token so the client can
+	// enter the dashboard without a second login.
+	s.deps.Auth.StartSession(c)
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 

@@ -7,14 +7,17 @@ import (
 
 const strategyColumns = `id, promotions, keywords, min_size, max_size, retire_seeders,
 	retire_minutes, retire_ratio_enabled, retire_ratio, retire_mode, dispatch_mode,
-	timezone, image_host, image_cover_enabled, retry_max`
+	timezone, image_host, image_cover_enabled, retry_max,
+	disk_low_gb, disk_critical_gb, low_speed_kbps, low_speed_duration_sec, low_speed_action`
 
 func (r *Repo) scanStrategy(s scanner) (*Strategy, error) {
 	var st Strategy
 	err := s.Scan(&st.ID, &st.Promotions, &st.Keywords, &st.MinSize, &st.MaxSize,
 		&st.RetireSeeders, &st.RetireMinutes, &st.RetireRatioEnabled, &st.RetireRatio,
 		&st.RetireMode, &st.DispatchMode, &st.Timezone, &st.ImageHost,
-		&st.ImageCoverEnabled, &st.RetryMax)
+		&st.ImageCoverEnabled, &st.RetryMax,
+		&st.DiskLowGB, &st.DiskCriticalGB, &st.LowSpeedKbps,
+		&st.LowSpeedDurationSec, &st.LowSpeedAction)
 	if err != nil {
 		return nil, wrapScanErr("scan strategy", err)
 	}
@@ -39,12 +42,16 @@ func (r *Repo) UpdateStrategy(ctx context.Context, st *Strategy) error {
 			promotions = ?, keywords = ?, min_size = ?, max_size = ?,
 			retire_seeders = ?, retire_minutes = ?, retire_ratio_enabled = ?,
 			retire_ratio = ?, retire_mode = ?, dispatch_mode = ?, timezone = ?,
-			image_host = ?, image_cover_enabled = ?, retry_max = ?
+			image_host = ?, image_cover_enabled = ?, retry_max = ?,
+			disk_low_gb = ?, disk_critical_gb = ?, low_speed_kbps = ?,
+			low_speed_duration_sec = ?, low_speed_action = ?
 		WHERE id = 1`,
 		st.Promotions, st.Keywords, st.MinSize, st.MaxSize,
 		st.RetireSeeders, st.RetireMinutes, st.RetireRatioEnabled,
 		st.RetireRatio, st.RetireMode, st.DispatchMode, st.Timezone,
-		st.ImageHost, st.ImageCoverEnabled, st.RetryMax)
+		st.ImageHost, st.ImageCoverEnabled, st.RetryMax,
+		st.DiskLowGB, st.DiskCriticalGB, st.LowSpeedKbps,
+		st.LowSpeedDurationSec, st.LowSpeedAction)
 	if err != nil {
 		return fmt.Errorf("store: update strategy: %w", err)
 	}

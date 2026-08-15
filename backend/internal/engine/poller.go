@@ -163,7 +163,7 @@ func (e *Engine) sourceFailed(ctx context.Context, src *store.Source, st *source
 			e.log.Error("poll: pause source", "source", src.Name, "error", perr)
 		}
 		e.notify(ctx, notifier.LevelCritical, "源站已自动暂停",
-			fmt.Sprintf("source=%s %s", src.Name, reason))
+			fmt.Sprintf("source=%s %s", src.Name, reason), "source_pause")
 
 		e.pollMu.Lock()
 		delete(e.pollState, src.ID)

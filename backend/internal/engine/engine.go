@@ -7,6 +7,7 @@ package engine
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"sync"
@@ -85,6 +86,13 @@ type Engine struct {
 	// monitor: guards the "all qB offline" critical against re-notify spam.
 	qbAllOffline atomic.Bool
 
+	// monitor: per-instance disk state ("ok"/"low"/"critical"), keyed by qB
+	// name. It de-duplicates the critical disk notification + activity log
+	// across monitor rounds; after a restart the map is empty and a re-notify
+	// is acceptable.
+	diskMu    sync.Mutex
+	diskState map[string]string
+
 	// Injectable seams (used by tests; defaults are production values).
 	now        func() time.Time
 	backoff    func(attempt int) time.Duration
@@ -101,18 +109,19 @@ func New(cfg Config, repo *store.Repo, pl Pipeline, qbMgr *qb.Manager, notif *no
 		qbMgr = qb.NewManager()
 	}
 	e := &Engine{
-		cfg:       cfg,
-		repo:      repo,
-		pl:        pl,
-		qbMgr:     qbMgr,
-		notif:     notif,
-		log:       slog.Default(),
-		jobs:      make(chan int64, cfg.Workers),
-		pollState: make(map[int64]*sourceState),
-		now:       time.Now,
-		backoff:   source.DefaultBackoff,
+		cfg:        cfg,
+		repo:       repo,
+		pl:         pl,
+		qbMgr:      qbMgr,
+		notif:      notif,
+		log:        slog.Default(),
+		jobs:       make(chan int64, cfg.Workers),
+		pollState:  make(map[int64]*sourceState),
+		diskState:  make(map[string]string),
+		now:        time.Now,
+		backoff:    source.DefaultBackoff,
 		httpClient: &http.Client{Timeout: 30 * time.Second},
-		fetchRSS:  source.FetchRSS,
+		fetchRSS:   source.FetchRSS,
 	}
 	e.dispatcher = NewDispatcher(repo, qbMgr)
 	e.retry = NewRetryQueue(e.now)
@@ -284,23 +293,74 @@ func (e *Engine) strategy(ctx context.Context) *store.Strategy {
 // defaultStrategy mirrors the schema defaults in migrations/00001_init.sql.
 func defaultStrategy() *store.Strategy {
 	return &store.Strategy{
-		ID:                 1,
-		RetireSeeders:      10,
-		RetireMinutes:      60,
-		RetireRatioEnabled: 0,
-		RetireRatio:        0,
-		RetireMode:         "and",
-		DispatchMode:       "priority",
-		RetryMax:           3,
+		ID:                  1,
+		RetireSeeders:       10,
+		RetireMinutes:       60,
+		RetireRatioEnabled:  0,
+		RetireRatio:         0,
+		RetireMode:          "and",
+		DispatchMode:        "priority",
+		RetryMax:            3,
+		DiskLowGB:           50,
+		DiskCriticalGB:      20,
+		LowSpeedKbps:        100,
+		LowSpeedDurationSec: 600,
+		LowSpeedAction:      "abort",
 	}
 }
 
-// notify delivers one notification through the router, if one is wired.
-func (e *Engine) notify(ctx context.Context, level notifier.Level, title, body string) {
+// notify delivers one notification through the router, if one is wired. event
+// is the action tag (e.g. "retire", "disk", "low_speed") the router uses to
+// aggregate warning/info notifications per (instance, tier, event).
+func (e *Engine) notify(ctx context.Context, level notifier.Level, title, body, event string) {
 	if e.notif == nil {
 		return
 	}
-	_ = e.notif.Notify(ctx, level, notifier.Message{Title: title, Body: body})
+	_ = e.notif.Notify(ctx, level, notifier.Message{Title: title, Body: body, Event: event})
+}
+
+// ResendSeed re-queues a seed for relay. fullRerun=false resets the seed's retry
+// state (retry_count=0, status=retry, error cleared) and re-enters the retry
+// queue; fullRerun=true additionally deletes every relay record and replica for
+// the seed so it is re-run from scratch (a fresh publish + cross-seed, not an
+// idempotent retry).
+//
+// This signature is a contract depended on by the API domain and must not
+// change.
+func (e *Engine) ResendSeed(ctx context.Context, seedID int64, fullRerun bool) error {
+	if _, err := e.repo.GetSeedByID(ctx, seedID); err != nil {
+		return fmt.Errorf("engine: resend seed %d: %w", seedID, err)
+	}
+
+	if fullRerun {
+		// The store domain owns relay_records and exposes no dedicated bulk-delete
+		// method, so the engine deletes the seed's records directly through the
+		// repo's raw handle. Replicas are removed via the existing DeleteReplica.
+		if _, err := e.repo.DB().ExecContext(ctx,
+			`DELETE FROM relay_records WHERE seed_id = ?`, seedID); err != nil {
+			return fmt.Errorf("engine: resend seed %d: delete records: %w", seedID, err)
+		}
+		reps, err := e.repo.ListReplicas(ctx, seedID)
+		if err != nil {
+			return fmt.Errorf("engine: resend seed %d: list replicas: %w", seedID, err)
+		}
+		for _, rep := range reps {
+			if err := e.repo.DeleteReplica(ctx, rep.ID); err != nil {
+				return fmt.Errorf("engine: resend seed %d: delete replica %d: %w", seedID, rep.ID, err)
+			}
+		}
+	}
+
+	// Reset retry state and re-enter the retry queue (retry number 1 → the first
+	// backoff step, 60s). retry_count is reset directly since no repo method
+	// sets it to an absolute value.
+	if _, err := e.repo.DB().ExecContext(ctx,
+		`UPDATE seeds SET retry_count = 0, status = 'retry', error = '', updated_at = unixepoch() WHERE id = ?`,
+		seedID); err != nil {
+		return fmt.Errorf("engine: resend seed %d: reset retry state: %w", seedID, err)
+	}
+	e.retry.Enqueue(seedID, 1)
+	return nil
 }
 
 // errAlreadyRunning is returned by Start when the engine is already running.
