@@ -761,6 +761,43 @@ func TestRelayPromotionFilterSkip(t *testing.T) {
 	}
 }
 
+func TestRelayPersistsPromotion(t *testing.T) {
+	repo := newRepo(t)
+	raw, infoHash := buildTorrent(t, "Test.Movie.2026.mkv")
+	fs := newFakeSource(t, raw, infoHash)
+	fs.promotion = "2x"
+
+	// Whitelist only "free" → the seed ends up skipped, but the promotion fetched
+	// from the detail page must already be persisted before the filter runs.
+	st, err := repo.GetStrategy(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.Promotions = `["free"]`
+	if err := repo.UpdateStrategy(context.Background(), st); err != nil {
+		t.Fatal(err)
+	}
+
+	src := insertSource(t, repo, fs.srv.URL)
+	seed := insertSeed(t, repo, src.ID, infoHash, "Test.Movie.2026.2160p.WEB-DL.HEVC.DDP")
+
+	p := newTestPipeline(repo, qb.NewManager(), nil, permissiveSourceFactory(), nil)
+	if err := p.Relay(context.Background(), seed.ID); err != nil {
+		t.Fatalf("Relay: %v", err)
+	}
+
+	got, err := repo.GetSeedByID(context.Background(), seed.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Promotion != "2x" {
+		t.Fatalf("seed promotion = %q, want 2x (persisted from detail)", got.Promotion)
+	}
+	if got.Status != "skipped" {
+		t.Fatalf("seed status = %q, want skipped", got.Status)
+	}
+}
+
 func TestPromotionFilterPass(t *testing.T) {
 	repo := newRepo(t)
 	st, err := repo.GetStrategy(context.Background())

@@ -351,6 +351,34 @@ func TestSeedCRUDAndIdempotentCreate(t *testing.T) {
 	}
 }
 
+func TestUpdateSeedPromotion(t *testing.T) {
+	repo, _ := newTestRepo(t)
+	sd := &Seed{SourceSite: "site", InfoHash: "hash", Title: "Movie", Status: "discovered"}
+	if _, err := repo.CreateSeed(ctx, sd); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := repo.UpdateSeedPromotion(ctx, sd.ID, "2x_free"); err != nil {
+		t.Fatalf("UpdateSeedPromotion: %v", err)
+	}
+	got, err := repo.GetSeedByID(ctx, sd.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Promotion != "2x_free" {
+		t.Fatalf("promotion = %q, want 2x_free", got.Promotion)
+	}
+
+	// A later fetch may refine the marker; overwrite must be allowed.
+	if err := repo.UpdateSeedPromotion(ctx, sd.ID, "free"); err != nil {
+		t.Fatalf("UpdateSeedPromotion overwrite: %v", err)
+	}
+	got, _ = repo.GetSeedByID(ctx, sd.ID)
+	if got.Promotion != "free" {
+		t.Fatalf("promotion after overwrite = %q, want free", got.Promotion)
+	}
+}
+
 func TestRelayRecordCRUD(t *testing.T) {
 	repo, _ := newTestRepo(t)
 	src := &Source{Name: "s", Role: "source", Status: "active"}

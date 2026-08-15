@@ -55,6 +55,7 @@ type Repo interface {
 	UpsertReplica(ctx context.Context, rep *store.Replica) error
 	AppendLogSeed(ctx context.Context, seedID int64, level, action, detail string) error
 	UpdateSeedStatus(ctx context.Context, id int64, status, errMsg string) error
+	UpdateSeedPromotion(ctx context.Context, id int64, promotion string) error
 }
 
 // QBSelector chooses a qB instance for download / cross-seed work. It has the
@@ -267,6 +268,11 @@ func (p *RelayOne) Relay(ctx context.Context, seedID int64) error {
 	detail, err := sp.FetchDetail(ctx, torrentID)
 	if err != nil {
 		return fmt.Errorf("pipeline: fetch detail: %w", err)
+	}
+	// Persist the promotion marker as soon as it is known (best-effort metadata;
+	// empty means the detail path yielded no promotion, so keep whatever we had).
+	if detail != nil && detail.Promotion != "" {
+		_ = p.repo.UpdateSeedPromotion(ctx, seedID, detail.Promotion)
 	}
 
 	// Promotion filter (after detail fetch): skip when the strategy whitelists

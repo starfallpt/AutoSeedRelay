@@ -94,6 +94,18 @@ func (r *Repo) UpdateSeedStatus(ctx context.Context, id int64, status, errMsg st
 	return nil
 }
 
+// UpdateSeedPromotion writes the promotion marker fetched from the detail page
+// back to the seed row. It is best-effort metadata: the pipeline ignores a
+// write failure because promotion is not critical to the relay flow.
+func (r *Repo) UpdateSeedPromotion(ctx context.Context, id int64, promotion string) error {
+	_, err := r.db.ExecContext(ctx, `
+		UPDATE seeds SET promotion = ?, updated_at = unixepoch() WHERE id = ?`, promotion, id)
+	if err != nil {
+		return fmt.Errorf("store: update seed %d promotion: %w", id, err)
+	}
+	return nil
+}
+
 // BumpRetry increments retry_count by one.
 func (r *Repo) BumpRetry(ctx context.Context, id int64) error {
 	_, err := r.db.ExecContext(ctx, `

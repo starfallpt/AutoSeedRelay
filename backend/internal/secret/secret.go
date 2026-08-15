@@ -13,8 +13,10 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 )
 
@@ -47,6 +49,7 @@ func LoadMasterKey(dataDir string) ([]byte, error) {
 		if err != nil {
 			return nil, fmt.Errorf("load master key %q: %w", path, err)
 		}
+		warnIfMasterKeyTooOpen(path)
 		return key, nil
 	} else if !os.IsNotExist(err) {
 		return nil, fmt.Errorf("read master key %q: %w", path, err)
@@ -64,6 +67,23 @@ func LoadMasterKey(dataDir string) ([]byte, error) {
 		return nil, fmt.Errorf("write master key %q: %w", path, err)
 	}
 	return key, nil
+}
+
+// warnIfMasterKeyTooOpen logs a warning when an existing master.key has
+// permissions wider than 0600 on POSIX systems. Windows has no meaningful
+// POSIX permission bits, so it is skipped there. The key is still accepted to
+// keep existing deployments working; the warning nudges operators to tighten.
+func warnIfMasterKeyTooOpen(path string) {
+	if runtime.GOOS == "windows" {
+		return
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return
+	}
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		slog.Warn("master key file permissions too open", "path", path, "perm", fmt.Sprintf("%04o", perm))
+	}
 }
 
 // decodeEnvKey validates the master key environment variable: exactly 64 hex

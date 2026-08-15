@@ -249,3 +249,115 @@ func TestWriteZipFileRejectsOversizedEntry(t *testing.T) {
 		t.Fatal("writeZipFile() = nil, want oversized-entry error")
 	}
 }
+
+// buildStandaloneDB creates a plain (non-WAL) SQLite file with a table, some
+// payload blobs, and user_version=1, and returns its raw bytes. It is used to
+// forge relay.db entries whose header stays valid while their body is later
+// corrupted or truncated.
+func buildStandaloneDB(t *testing.T, dir, name string, blobs int) []byte {
+	t.Helper()
+	path := filepath.Join(dir, name)
+	db, err := sql.Open(store.DriverName, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TABLE t (x)`); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	for i := 0; i < blobs; i++ {
+		if _, err := db.Exec(`INSERT INTO t (x) VALUES (randomblob(4000))`); err != nil {
+			db.Close()
+			t.Fatal(err)
+		}
+	}
+	if _, err := db.Exec(`PRAGMA user_version = 1`); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
+}
+
+func TestRestoreRejectsIntegrityCheckFailure(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "relay.db")
+	st, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	st.Close()
+
+	// A structurally valid header with a corrupted body page: user_version reads
+	// fine (header untouched), but PRAGMA integrity_check must fail.
+	bad := buildStandaloneDB(t, dir, "bad.db", 50)
+	start := len(bad) / 2
+	for i := start; i < len(bad) && i < start+512; i++ {
+		bad[i] ^= 0xFF
+	}
+
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	w, _ := zw.Create(metaFileName)
+	_, _ = w.Write([]byte(`{"schema_version":1,"app_version":"x","exported_at":"y"}`))
+	w2, _ := zw.Create(dbFileName)
+	_, _ = w2.Write(bad)
+	_ = zw.Close()
+
+	err = Restore(ctx, dbPath, bytes.NewReader(buf.Bytes()))
+	if err == nil {
+		t.Fatal("expected integrity-check rejection for corrupt relay.db, got nil")
+	}
+	if !strings.Contains(err.Error(), "integrity") {
+		t.Fatalf("expected integrity-check error, got: %v", err)
+	}
+}
+
+func TestRestoreRejectsTruncatedDB(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "relay.db")
+	st, err := store.Open(dbPath)
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	st.Close()
+
+	// meta.json is valid, but relay.db is truncated to just past its header.
+	trunc := buildStandaloneDB(t, dir, "trunc.db", 0)
+	if len(trunc) > 600 {
+		trunc = trunc[:600]
+	}
+
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	w, _ := zw.Create(metaFileName)
+	_, _ = w.Write([]byte(`{"schema_version":1,"app_version":"x","exported_at":"y"}`))
+	w2, _ := zw.Create(dbFileName)
+	_, _ = w2.Write(trunc)
+	_ = zw.Close()
+
+	if err := Restore(ctx, dbPath, bytes.NewReader(buf.Bytes())); err == nil {
+		t.Fatal("expected rejection for truncated relay.db, got nil")
+	}
+}
+
+func TestAutoBackupSkipsWhenNoExistingDB(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "relay.db")
+
+	if err := autoBackup(dbPath); err != nil {
+		t.Fatalf("autoBackup(no existing db) = %v, want nil", err)
+	}
+	// The backups dir must not even be created when there is nothing to back up.
+	if _, err := os.Stat(filepath.Join(dir, "backups")); !os.IsNotExist(err) {
+		t.Fatalf("backups dir should not exist, stat err = %v", err)
+	}
+}

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/hex"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -237,5 +238,34 @@ func TestLoadMasterKeyFileInvalidLength(t *testing.T) {
 	}
 	if _, err := LoadMasterKey(dataDir); err == nil {
 		t.Fatal("expected error for a master.key of invalid length")
+	}
+}
+
+func TestLoadMasterKeyWarnsOnOpenPermissions(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("windows skips the permission check")
+	}
+	dataDir := t.TempDir()
+	hexKey := strings.Repeat("0a", masterKeyBytes)
+	if err := os.WriteFile(filepath.Join(dataDir, masterKeyFileName), []byte(hexKey), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Capture slog output to assert the warning is actually emitted.
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	defer slog.SetDefault(prev)
+
+	key, err := LoadMasterKey(dataDir)
+	if err != nil {
+		t.Fatalf("LoadMasterKey: %v", err)
+	}
+	want, _ := hex.DecodeString(hexKey)
+	if !bytes.Equal(key, want) {
+		t.Fatalf("got %x, want %x", key, want)
+	}
+	if !strings.Contains(buf.String(), "master key file permissions too open") {
+		t.Fatalf("expected permission warning, got log %q", buf.String())
 	}
 }
